@@ -44,6 +44,35 @@ class TaskRepository(private val jdbcClient: JdbcClient) {
         return inserted.orElseGet { findByIdempotencyKey(task.idempotencyKey) }
     }
 
+    fun claimDueTasks(shards: List<Int>, leaseOwner: String, limit: Int = 500): List<Task> {
+        if (shards.isEmpty()) return emptyList()
+
+        return jdbcClient.sql(
+            """
+            UPDATE tasks
+               SET state = 'firing',
+                   lease_owner = :leaseOwner,
+                   lease_expires_at = now() + interval '30 seconds',
+                   version = version + 1
+             WHERE id IN (
+                 SELECT id FROM tasks
+                  WHERE shard IN (:shards)
+                    AND state = 'pending'
+                    AND fire_at <= now()
+                  ORDER BY fire_at
+                  FOR UPDATE SKIP LOCKED
+                  LIMIT :limit
+             )
+            RETURNING *
+            """.trimIndent()
+        )
+            .param("leaseOwner", leaseOwner)
+            .param("shards", shards)
+            .param("limit", limit)
+            .query(::mapRow)
+            .list()
+    }
+
     fun findById(id: UUID): Task? =
         jdbcClient.sql("SELECT * FROM tasks WHERE id = :id")
             .param("id", id)

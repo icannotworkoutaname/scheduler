@@ -4,16 +4,19 @@ import jakarta.validation.Valid
 import org.springframework.http.HttpStatus
 import org.springframework.http.ResponseEntity
 import org.springframework.web.bind.annotation.*
-import java.time.Instant
+import java.time.Clock
 import java.util.UUID
 
 @RestController
 @RequestMapping("/tasks")
-class TaskController(private val taskRepository: TaskRepository) {
+class TaskController(
+    private val taskRepository: TaskRepository,
+    private val clock: Clock,
+) {
 
     @PostMapping
     fun submit(@Valid @RequestBody request: CreateTaskRequest): ResponseEntity<TaskResponse> {
-        val now = Instant.now() // TODO(8/7): 替换成注入的 java.time.Clock
+        val now = clock.instant()
         TaskValidation.validateFireAt(request.fireAt, now)
 
         val task = Task.newPending(
