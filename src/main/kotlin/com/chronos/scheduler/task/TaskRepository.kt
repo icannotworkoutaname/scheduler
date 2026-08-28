@@ -53,7 +53,8 @@ class TaskRepository(private val jdbcClient: JdbcClient) {
                SET state = 'firing',
                    lease_owner = :leaseOwner,
                    lease_expires_at = now() + interval '30 seconds',
-                   version = version + 1
+                   version = version + 1,
+                   attempt_count = attempt_count + 1
              WHERE id IN (
                  SELECT id FROM tasks
                   WHERE shard IN (:shards)
@@ -71,6 +72,28 @@ class TaskRepository(private val jdbcClient: JdbcClient) {
             .param("limit", limit)
             .query(::mapRow)
             .list()
+    }
+
+    /**
+     * firing -> succeeded, guarded by the version this node observed at claim
+     * time. A 0-row update here would mean something else touched this row
+     * between claim and completion — shouldn't happen in the single-node case
+     * we're in today, but the guard costs nothing and stays correct once 8/10
+     * introduces real multi-node contention.
+     */
+    fun markSucceeded(id: UUID, expectedVersion: Long): Boolean {
+        val rows = jdbcClient.sql(
+            """
+            UPDATE tasks
+               SET state = 'succeeded',
+                   version = version + 1
+             WHERE id = :id AND version = :expectedVersion
+            """.trimIndent()
+        )
+            .param("id", id)
+            .param("expectedVersion", expectedVersion)
+            .update()
+        return rows == 1
     }
 
     fun findById(id: UUID): Task? =

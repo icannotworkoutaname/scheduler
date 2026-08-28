@@ -2,6 +2,8 @@ package com.chronos.scheduler.polling
 
 import com.chronos.scheduler.node.NodeIdentity
 import com.chronos.scheduler.shard.ShardAssignment
+import com.chronos.scheduler.sink.TaskSink
+import com.chronos.scheduler.sink.triggerIdFor
 import com.chronos.scheduler.task.Task
 import com.chronos.scheduler.task.TaskRepository
 import org.slf4j.LoggerFactory
@@ -14,6 +16,7 @@ class PollingLoop(
     private val taskRepository: TaskRepository,
     private val shardAssignment: ShardAssignment,
     private val nodeIdentity: NodeIdentity,
+    private val taskSink: TaskSink,
     private val taskExecutor: ExecutorService,
 ) {
     private val log = LoggerFactory.getLogger(javaClass)
@@ -33,8 +36,20 @@ class PollingLoop(
     }
 
     private fun handle(task: Task) {
-        // 占位。真正调用 HttpSink、状态转 succeeded/retrying 是 8/8 的任务。
-        // 今天要验证的只是:claim 到的任务被正确交给线程池,不在轮询线程里同步处理。
-        log.info("would fire task {} to {}", task.id, task.callbackUrl)
+        val triggerId = triggerIdFor(task.id)
+        val result = taskSink.fire(task, triggerId, task.attemptCount)
+
+        if (result.success) {
+            val updated = taskRepository.markSucceeded(task.id, task.version)
+            if (updated) {
+                log.info("task {} succeeded, triggerId={}, httpStatus={}", task.id, triggerId, result.httpStatus)
+            } else {
+                log.warn("markSucceeded affected 0 rows for task {} — version mismatch", task.id)
+            }
+        } else {
+            // 8/9 补:指数退避重试 + 死信 + reaper。今天失败的任务会卡在firing 状态出不来，后续添加其他
+            // 处理的缺口
+            log.warn("task {} sink call failed, httpStatus={} — retry/backoff lands 8/9", task.id, result.httpStatus)
+        }
     }
 }
