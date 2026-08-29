@@ -2,6 +2,7 @@ package com.chronos.scheduler.polling
 
 import com.chronos.scheduler.node.NodeIdentity
 import com.chronos.scheduler.shard.ShardAssignment
+import com.chronos.scheduler.sink.RetryPolicy
 import com.chronos.scheduler.sink.TaskSink
 import com.chronos.scheduler.sink.triggerIdFor
 import com.chronos.scheduler.task.Task
@@ -47,9 +48,22 @@ class PollingLoop(
                 log.warn("markSucceeded affected 0 rows for task {} — version mismatch", task.id)
             }
         } else {
-            // 8/9 补:指数退避重试 + 死信 + reaper。今天失败的任务会卡在firing 状态出不来，后续添加其他
-            // 处理的缺口
-            log.warn("task {} sink call failed, httpStatus={} — retry/backoff lands 8/9", task.id, result.httpStatus)
+            val updated = taskRepository.markFailed(task.id, task.attemptCount, task.version)
+            if (updated) {
+                if (RetryPolicy.shouldRetry(task.attemptCount)) {
+                    log.warn(
+                        "task {} sink call failed (attempt {}), retrying after backoff, httpStatus={}",
+                        task.id, task.attemptCount, result.httpStatus
+                    )
+                } else {
+                    log.error(
+                        "task {} sink call failed (attempt {}), exhausted retries, moved to dead, httpStatus={}",
+                        task.id, task.attemptCount, result.httpStatus
+                    )
+                }
+            } else {
+                log.warn("markFailed affected 0 rows for task {} — version mismatch", task.id)
+            }
         }
     }
 }

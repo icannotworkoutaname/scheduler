@@ -1,11 +1,14 @@
 package com.chronos.scheduler.task
 
+import com.chronos.scheduler.sink.RetryPolicy
 import org.postgresql.util.PGobject
 import org.springframework.jdbc.core.simple.JdbcClient
 import org.springframework.stereotype.Repository
 import java.sql.Timestamp
 import java.time.Instant
 import java.util.UUID
+
+data class ReclaimedLease(val taskId: UUID, val previousOwner: String?)
 
 @Repository
 class TaskRepository(private val jdbcClient: JdbcClient) {
@@ -58,7 +61,7 @@ class TaskRepository(private val jdbcClient: JdbcClient) {
              WHERE id IN (
                  SELECT id FROM tasks
                   WHERE shard IN (:shards)
-                    AND state = 'pending'
+                    AND state IN ('pending', 'retrying')
                     AND fire_at <= now()
                   ORDER BY fire_at
                   FOR UPDATE SKIP LOCKED
@@ -94,6 +97,85 @@ class TaskRepository(private val jdbcClient: JdbcClient) {
             .param("expectedVersion", expectedVersion)
             .update()
         return rows == 1
+    }
+
+    /**
+     * firing -> retrying (with backoff) or firing -> dead, decided by whether
+     * attempt has hit RetryPolicy.MAX_ATTEMPTS. Guarded by expectedVersion for
+     * the same reason markSucceeded is — cheap correctness insurance.
+     */
+    fun markFailed(id: UUID, attempt: Int, expectedVersion: Long): Boolean {
+        val rows = if (RetryPolicy.shouldRetry(attempt)) {
+            val backoff = RetryPolicy.backoffFor(attempt)
+            jdbcClient.sql(
+                """
+                UPDATE tasks
+                   SET state = 'retrying',
+                       fire_at = now() + make_interval(secs => :backoffSeconds),
+                       version = version + 1
+                 WHERE id = :id AND version = :expectedVersion
+                """.trimIndent()
+            )
+                .param("id", id)
+                .param("expectedVersion", expectedVersion)
+                .param("backoffSeconds", backoff.seconds.toDouble())
+                .update()
+        } else {
+            jdbcClient.sql(
+                """
+                UPDATE tasks
+                   SET state = 'dead',
+                       version = version + 1
+                 WHERE id = :id AND version = :expectedVersion
+                """.trimIndent()
+            )
+                .param("id", id)
+                .param("expectedVersion", expectedVersion)
+                .update()
+        }
+        return rows == 1
+    }
+
+    /**
+     * requirements.md §6: sweeps rows stuck in 'firing' past their lease and
+     * returns them to 'pending'. This is the mechanism that turns a node freeze
+     * into a recoverable duplicate rather than a lost task — the entire premise
+     * of chaos scenario 6 (8/21) depends on this working correctly.
+     *
+     * The CTE captures lease_owner BEFORE it gets wiped, purely for the log line
+     * below — knowing which node died is useful during the freeze scenario.
+     * Still a single atomic statement: no intermediate state a crash can land in,
+     * same discipline as the claim query in §7.1.
+     */
+    fun reclaimExpiredLeases(limit: Int = 500): List<ReclaimedLease> {
+        return jdbcClient.sql(
+            """
+            WITH expired AS (
+                SELECT id, lease_owner AS previous_owner
+                  FROM tasks
+                 WHERE state = 'firing'
+                   AND lease_expires_at < now()
+                 FOR UPDATE SKIP LOCKED
+                 LIMIT :limit
+            )
+            UPDATE tasks
+               SET state = 'pending',
+                   lease_owner = NULL,
+                   lease_expires_at = NULL,
+                   version = version + 1
+              FROM expired
+             WHERE tasks.id = expired.id
+            RETURNING tasks.id, expired.previous_owner
+            """.trimIndent()
+        )
+            .param("limit", limit)
+            .query { rs, _ ->
+                ReclaimedLease(
+                    taskId = rs.getObject("id", UUID::class.java),
+                    previousOwner = rs.getString("previous_owner"),
+                )
+            }
+            .list()
     }
 
     fun findById(id: UUID): Task? =
