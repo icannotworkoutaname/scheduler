@@ -3,38 +3,48 @@ package com.chronos.scheduler.shard
 import org.springframework.jdbc.core.simple.JdbcClient
 import org.springframework.stereotype.Repository
 
+data class ClaimedShard(val shardId: Int, val previousOwner: String?)
+
 @Repository
 class ShardLeaseRepository(private val jdbcClient: JdbcClient) {
 
     /**
-     * Greedily claims up to `softCap` shards whose lease is null or expired.
-     * Same SKIP LOCKED idiom as TaskRepository.claimDueTasks (requirements.md
-     * §7.1) — multiple nodes can call this concurrently against the same 64
-     * rows without blocking each other, each just skips rows another node is
-     * currently touching.
+     * Same SKIP LOCKED idiom as before, now captures the previous owner via a
+     * CTE (same technique as TaskRepository.reclaimExpiredLeases, 8/9). This
+     * lets callers tell "claimed a shard nobody held" apart from "took over a
+     * shard someone else used to hold" — only the latter counts toward
+     * lease_takeover_total (requirements.md §9).
      */
-    fun claimAvailableShards(nodeId: String, softCap: Int): List<Int> {
+    fun claimAvailableShards(nodeId: String, softCap: Int): List<ClaimedShard> {
         if (softCap <= 0) return emptyList()
 
         return jdbcClient.sql(
             """
+            WITH available AS (
+                SELECT shard_id, lease_owner AS previous_owner
+                  FROM shards
+                 WHERE lease_owner IS NULL OR lease_expires_at < now()
+                 ORDER BY shard_id
+                 FOR UPDATE SKIP LOCKED
+                 LIMIT :softCap
+            )
             UPDATE shards
                SET lease_owner = :nodeId,
                    lease_expires_at = now() + interval '30 seconds',
                    version = version + 1
-             WHERE shard_id IN (
-                 SELECT shard_id FROM shards
-                  WHERE lease_owner IS NULL OR lease_expires_at < now()
-                  ORDER BY shard_id
-                  FOR UPDATE SKIP LOCKED
-                  LIMIT :softCap
-             )
-            RETURNING shard_id
+              FROM available
+             WHERE shards.shard_id = available.shard_id
+            RETURNING shards.shard_id, available.previous_owner
             """.trimIndent()
         )
             .param("nodeId", nodeId)
             .param("softCap", softCap)
-            .query { rs, _ -> rs.getInt("shard_id") }
+            .query { rs, _ ->
+                ClaimedShard(
+                    shardId = rs.getInt("shard_id"),
+                    previousOwner = rs.getString("previous_owner"),
+                )
+            }
             .list()
     }
 

@@ -1,6 +1,7 @@
 package com.chronos.scheduler.shard
 
 import com.chronos.scheduler.node.NodeIdentity
+import io.micrometer.core.instrument.MeterRegistry
 import org.slf4j.LoggerFactory
 import org.springframework.scheduling.annotation.Scheduled
 import org.springframework.stereotype.Component
@@ -21,8 +22,10 @@ class ShardHeartbeat(
     private val shardLeaseRepository: ShardLeaseRepository,
     private val shardAllocator: ShardAllocator,
     private val nodeIdentity: NodeIdentity,
+    meterRegistry: MeterRegistry,
 ) {
     private val log = LoggerFactory.getLogger(javaClass)
+    private val leaseTakeoverCounter = meterRegistry.counter("chronos.lease.takeover.total")
 
     /**
      * Gates renewAndRebalance() until ShardBootstrap has finished its own
@@ -59,12 +62,15 @@ class ShardHeartbeat(
             emptyList()
         }
 
-        if (newlyClaimed.isNotEmpty()) {
+        val takeovers = newlyClaimed.filter { it.previousOwner != null && it.previousOwner != nodeIdentity.nodeId }
+        if (takeovers.isNotEmpty()) {
+            leaseTakeoverCounter.increment(takeovers.size.toDouble())
             log.warn(
-                "node {} took over {} previously unowned/expired shard(s): {} (now holds {} total)",
-                nodeIdentity.nodeId, newlyClaimed.size, newlyClaimed, renewed.size + newlyClaimed.size
+                "node {} took over {} shard(s) previously held by other node(s): {}",
+                nodeIdentity.nodeId, takeovers.size, takeovers
             )
         }
+
         log.info(
             "node {} heartbeat: renewed={} activeOwners={} softCap={}",
             nodeIdentity.nodeId, renewed.size, activeOwners, softCap

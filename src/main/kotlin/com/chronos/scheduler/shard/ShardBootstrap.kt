@@ -22,7 +22,7 @@ class ShardBootstrap(
         // 目的只是尽快让自己出现在 countDistinctActiveOwners() 里，
         // 让几乎同时启动的兄弟节点有机会"看见"自己。
         val announced = shardLeaseRepository.claimAvailableShards(nodeIdentity.nodeId, 1)
-        log.info("node {} announced with shard(s) {}", nodeIdentity.nodeId, announced)
+        log.info("node {} announced with shard(s) {}", nodeIdentity.nodeId, announced.map { it.shardId })
 
         // Phase 2 —— 等待:给兄弟节点留出时间也完成它们自己的 Phase 1。
         // 这次延迟放在报到之后，不是放在报到之前——上次的版本睡在最前面，
