@@ -55,4 +55,27 @@ class ShardLeaseRepository(private val jdbcClient: JdbcClient) {
             .query { rs, _ -> rs.getInt("shard_id") }
             .list()
     }
+
+    /**
+     * Renews every shard this node currently holds. WHERE lease_owner = :nodeId
+     * is a CAS guard, not a defensive afterthought: if another node already
+     * reclaimed one of these rows (this node was slow, or briefly partitioned),
+     * that row's lease_owner no longer matches, and this UPDATE silently skips
+     * it — the node's view of "what I own" self-corrects to match the database's
+     * authoritative state on the very next poll, no special-case code needed.
+     */
+    fun renewOwnedShards(nodeId: String): List<Int> {
+        return jdbcClient.sql(
+            """
+            UPDATE shards
+               SET lease_expires_at = now() + interval '30 seconds',
+                   version = version + 1
+             WHERE lease_owner = :nodeId
+            RETURNING shard_id
+            """.trimIndent()
+        )
+            .param("nodeId", nodeId)
+            .query { rs, _ -> rs.getInt("shard_id") }
+            .list()
+    }
 }
