@@ -35,15 +35,29 @@ db_now() {
 # 认领"协议）绕过去，之后只能指望心跳去抢救，而心跳从设计上就不保证公平，
 # 短时间内重试也救不回来（两个节点的心跳相位在几秒内几乎不变，谁先手
 # 抢到全部 64 个是确定性的，不是随机的）。
+# receiver 的响应延迟(8/21 场景 6 引入)也必须在这里归零。POST /reset 只清
+# 计数器和 triggerId 集合，不碰 configure 设的开关——延迟是进程级的全局状态，
+# 会跨场景残留：跑完场景 6 再复用同一个 receiver 进程跑场景 1，残留的 8 秒
+# 延迟会悄悄打乱 wait_for_single_owner 45 之类等待窗口的假设，而且不会报错，
+# 只会表现为莫名其妙的超时。这是 8/19 那次"数据库和 receiver 两边必须一起
+# 归零"教训的延续。
 reset_environment() {
   PGPASSWORD=scheduler psql -h localhost -U scheduler -d scheduler -c "TRUNCATE tasks;" > /dev/null
   curl -sf -X POST "http://localhost:9000/reset" > /dev/null \
     || echo "[WARN] receiver reset failed — is scripts/receiver.py running on :9000?" >&2
+  curl -sf -X POST "http://localhost:9000/configure" -H "Content-Type: application/json" \
+    -d '{"fail_rate": 0, "dedup_enabled": true, "response_delay_seconds": 0}' > /dev/null || true
 }
 
-# 真正需要清空 shard 租约、让节点从零开始重新分配的场景才调用这个——
-# 目前没有场景需要它，保留是为了让"清任务"和"清 shard"这两件事在概念上
-# 分开，不要再因为顺手一起做而重蹈今天的覆辙。
+# 真正需要清空 shard 租约、让节点从零开始重新分配的场景才调用这个。
+# 8/21 起有了第一个真正的使用者：场景 6 自己启动两个全新节点，必须在启动
+# 之前清掉上一轮遗留的租约，否则新节点会看到一堆还没过期、但主人早已不在
+# 的租约，Phase 1 的"报到"抢不到 shard，公平分配从一开始就是歪的。
+#
+# 注意它为什么不能被塞进 reset_environment()：场景 1/2 是对着**已经在跑**的
+# 节点调用 reset_environment 的，对它们清空租约等于把唯一保证公平的机制
+# （启动时那次"报到-等待-认领"协议）绕过去，之后只能指望心跳去抢救，而心跳
+# 从设计上就不保证公平（8/20 复盘）。"清任务"和"清 shard"必须保持是两件事。
 reset_shard_leases() {
   PGPASSWORD=scheduler psql -h localhost -U scheduler -d scheduler -c \
     "UPDATE shards SET lease_owner = NULL, lease_expires_at = NULL;" > /dev/null
@@ -129,9 +143,17 @@ any_live_port() {
   return 1
 }
 
+# 第二个参数(响应延迟秒数)可选，默认 0——昨天以前的调用方式不用改。
 configure_receiver() {
   local fr=$1
+  local delay=${2:-0}
   curl -sf -X POST "http://localhost:9000/configure" -H "Content-Type: application/json" \
-    -d "{\"fail_rate\": $fr, \"dedup_enabled\": true}" > /dev/null \
+    -d "{\"fail_rate\": $fr, \"dedup_enabled\": true, \"response_delay_seconds\": $delay}" > /dev/null \
     || echo "[WARN] receiver configure failed — is scripts/receiver.py running on :9000?" >&2
+}
+
+# 从 JSON 里取一个顶层字段。项目里没装 jq(装它要 sudo + 网络)，而 python3
+# 本来就是 receiver 和 consistency_check 的依赖，不额外引入任何东西。
+json_field() {
+  python3 -c "import json,sys; print(json.load(sys.stdin).get('$1',''))"
 }
