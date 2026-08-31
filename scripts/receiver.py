@@ -33,6 +33,10 @@ class Handler(BaseHTTPRequestHandler):
     def do_POST(self):
         if self.path == "/hook":
             self._handle_hook()
+        elif self.path == "/reset":
+            self._handle_reset()
+        elif self.path == "/configure":
+            self._handle_configure()
         else:
             self.send_response(404)
             self.end_headers()
@@ -70,6 +74,32 @@ class Handler(BaseHTTPRequestHandler):
 
         self.send_response(200)
         self.end_headers()
+
+    def _handle_reset(self):
+        with lock:
+            seen_trigger_ids.clear()
+            stats.update({
+                "total_requests": 0,
+                "business_actions": 0,
+                "duplicate_triggers": 0,
+                "failures_injected": 0,
+            })
+        self.send_response(200)
+        self.end_headers()
+
+    def _handle_configure(self):
+        global fail_rate, dedup_enabled
+        length = int(self.headers.get("Content-Length", 0))
+        body = json.loads(self.rfile.read(length) or b"{}")
+        with lock:
+            if "fail_rate" in body:
+                fail_rate = float(body["fail_rate"])
+            if "dedup_enabled" in body:
+                dedup_enabled = bool(body["dedup_enabled"])
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.end_headers()
+        self.wfile.write(json.dumps({"fail_rate": fail_rate, "dedup_enabled": dedup_enabled}).encode())
 
     def _handle_stats(self):
         with lock:
