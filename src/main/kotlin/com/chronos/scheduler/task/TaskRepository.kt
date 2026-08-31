@@ -178,6 +178,45 @@ class TaskRepository(private val jdbcClient: JdbcClient) {
             .list()
     }
 
+    /**
+     * requirements.md §6: "cancel and reschedule are legal only from pending."
+     * The WHERE clause IS that rule — a task in any other state just won't
+     * match, 0 rows come back, no separate state-check-then-update needed.
+     */
+    fun cancelIfPending(id: UUID): Boolean {
+        val rows = jdbcClient.sql(
+            """
+            UPDATE tasks
+               SET state = 'cancelled', version = version + 1
+             WHERE id = :id AND state = 'pending'
+            """.trimIndent()
+        )
+            .param("id", id)
+            .update()
+        return rows == 1
+    }
+
+    /**
+     * requirements.md §7: reschedule under the polling design is just an
+     * UPDATE fire_at — no data structure to rebalance. version is the
+     * client-supplied optimistic lock (requirements.md §3), guarding against
+     * two callers racing to reschedule off the same stale read.
+     */
+    fun rescheduleIfPending(id: UUID, newFireAt: Instant, expectedVersion: Long): Boolean {
+        val rows = jdbcClient.sql(
+            """
+            UPDATE tasks
+               SET fire_at = :newFireAt, version = version + 1
+             WHERE id = :id AND state = 'pending' AND version = :expectedVersion
+            """.trimIndent()
+        )
+            .param("id", id)
+            .param("newFireAt", Timestamp.from(newFireAt))
+            .param("expectedVersion", expectedVersion)
+            .update()
+        return rows == 1
+    }
+
     fun findById(id: UUID): Task? =
         jdbcClient.sql("SELECT * FROM tasks WHERE id = :id")
             .param("id", id)

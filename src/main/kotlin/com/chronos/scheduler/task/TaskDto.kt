@@ -28,3 +28,8 @@ fun Task.toResponse() = TaskResponse(
     state = state.name.lowercase(),
     fireAt = fireAt,
 )
+
+data class RescheduleRequest(
+    val fireAt: Instant,
+    val version: Long,
+)
