@@ -67,7 +67,7 @@ class RetryDeadLetterTest {
             val claimed = repo.claimDueTasks(listOf(7), "s2-node")
             if (claimed.isEmpty()) break
             claims++
-            val task = claimed.single()
+            val task = claimed.single().task
             repo.markFailed(task.id, task.attemptCount, task.version)
             // markFailed on a retryable attempt pushes fire_at out by the
             // backoff; yank it back so the next claim picks it up immediately.

@@ -10,6 +10,18 @@ import java.util.UUID
 
 data class ReclaimedLease(val taskId: UUID, val previousOwner: String?)
 
+/**
+ * A task the claim query just moved to 'firing', plus the database's own `now()`
+ * from that same UPDATE ... RETURNING. requirements.md §9 / ADR-004 decision 1:
+ * trigger delay is `dbFiredAt - task.fireAt` — both timestamps come from Postgres,
+ * never a node's Instant.now(), so a node with a skewed or drifting clock still
+ * reports a correct delay.
+ */
+data class ClaimedTask(val task: Task, val dbFiredAt: Instant) {
+    val triggerDelay: java.time.Duration
+        get() = java.time.Duration.between(task.fireAt, dbFiredAt)
+}
+
 @Repository
 class TaskRepository(private val jdbcClient: JdbcClient) {
 
@@ -47,7 +59,7 @@ class TaskRepository(private val jdbcClient: JdbcClient) {
         return inserted.orElseGet { findByIdempotencyKey(task.idempotencyKey) }
     }
 
-    fun claimDueTasks(shards: List<Int>, leaseOwner: String, limit: Int = 500): List<Task> {
+    fun claimDueTasks(shards: List<Int>, leaseOwner: String, limit: Int = 500): List<ClaimedTask> {
         if (shards.isEmpty()) return emptyList()
 
         return jdbcClient.sql(
@@ -67,15 +79,31 @@ class TaskRepository(private val jdbcClient: JdbcClient) {
                   FOR UPDATE SKIP LOCKED
                   LIMIT :limit
              )
-            RETURNING *
+            RETURNING *, now() AS db_fired_at
             """.trimIndent()
         )
             .param("leaseOwner", leaseOwner)
             .param("shards", shards)
             .param("limit", limit)
-            .query(::mapRow)
+            .query { rs, rowNum ->
+                ClaimedTask(mapRow(rs, rowNum), rs.getTimestamp("db_fired_at").toInstant())
+            }
             .list()
     }
+
+    /**
+     * requirements.md §9 / ADR-004 decision 3: backing query for the per-shard
+     * tasks_pending gauge. Deliberately called on a slow cadence (every 15s from
+     * SchedulerMetrics' own thread), never per Prometheus scrape — a
+     * count-GROUP-BY over a million-row table is a load source in its own right.
+     */
+    fun pendingCountByShard(): Map<Int, Int> =
+        jdbcClient.sql(
+            "SELECT shard, count(*) c FROM tasks WHERE state IN ('pending', 'retrying') GROUP BY shard"
+        )
+            .query { rs, _ -> rs.getInt("shard") to rs.getInt("c") }
+            .list()
+            .toMap()
 
     /**
      * firing -> succeeded, guarded by the version this node observed at claim

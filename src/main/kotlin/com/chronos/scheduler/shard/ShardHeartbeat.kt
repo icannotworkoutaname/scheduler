@@ -1,6 +1,7 @@
 package com.chronos.scheduler.shard
 
 import com.chronos.scheduler.node.NodeIdentity
+import io.micrometer.core.instrument.Counter
 import io.micrometer.core.instrument.MeterRegistry
 import org.slf4j.LoggerFactory
 import org.springframework.beans.factory.annotation.Value
@@ -39,7 +40,9 @@ class ShardHeartbeat(
     meterRegistry: MeterRegistry,
 ) {
     private val log = LoggerFactory.getLogger(javaClass)
-    private val leaseTakeoverCounter = meterRegistry.counter("chronos.lease.takeover.total")
+    private val leaseTakeoverCounter = Counter.builder("chronos.lease.takeover.total")
+        .description("shards this node claimed whose lease was previously held by a different, now-absent node")
+        .register(meterRegistry)
 
     /**
      * Gates renewAndRebalance() until ShardBootstrap has finished its own
