@@ -1,0 +1,282 @@
+{
+  "uid": "chronos-overview",
+  "title": "Chronos scheduler",
+  "editable": false,
+  "timezone": "browser",
+  "refresh": "10s",
+  "time": { "from": "now-15m", "to": "now" },
+  "schemaVersion": 39,
+  "tags": ["chronos"],
+  "templating": { "list": [] },
+  "annotations": { "list": [] },
+  "panels": [
+    {
+      "type": "row",
+      "title": "README figures — each panel below is meant to be screenshotted on its own",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 0 },
+      "id": 100,
+      "collapsed": false
+    },
+    {
+      "id": 1,
+      "type": "timeseries",
+      "title": "① Failover — shard takeover vs. trigger throughput",
+      "description": "Kill one of two nodes. `lease_takeover_total` steps up as the survivor claims the dead node's 32 shards; trigger throughput dips for a few seconds, then recovers to its previous level. A useful screenshot MUST include the recovery — cropping to just the dip reads as 'the system broke', which is the opposite of the point.",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 9, "w": 24, "x": 0, "y": 1 },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(chronos_lease_takeover_total)",
+          "legendFormat": "cumulative shard takeovers"
+        },
+        {
+          "refId": "B",
+          "expr": "sum(rate(chronos_trigger_delay_seconds_count[30s]))",
+          "legendFormat": "trigger throughput (/s)"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 8,
+            "spanNulls": true,
+            "axisLabel": "cumulative takeovers"
+          }
+        },
+        "overrides": [
+          {
+            "matcher": { "id": "byName", "options": "trigger throughput (/s)" },
+            "properties": [
+              { "id": "custom.axisPlacement", "value": "right" },
+              { "id": "custom.axisLabel", "value": "triggers / sec" },
+              { "id": "unit", "value": "reqps" },
+              { "id": "color", "value": { "mode": "fixed", "fixedColor": "green" } }
+            ]
+          },
+          {
+            "matcher": { "id": "byName", "options": "cumulative shard takeovers" },
+            "properties": [
+              { "id": "color", "value": { "mode": "fixed", "fixedColor": "orange" } },
+              { "id": "custom.drawStyle", "value": "line" },
+              { "id": "custom.lineInterpolation", "value": "stepAfter" }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "legend": { "displayMode": "list", "placement": "bottom", "calcs": [] },
+        "tooltip": { "mode": "multi", "sort": "none" }
+      }
+    },
+    {
+      "id": 2,
+      "type": "timeseries",
+      "title": "② Duplicate triggers absorbed by the optimistic lock",
+      "description": "Expected to be FLAT AT ZERO except while chaos scenario 6 (node freeze) is running. Each step is a late duplicate delivery — a node fired a task another node had already completed — that the optimistic lock turned into a 0-row no-op. The step is the evidence the system stayed correct, not evidence of a bug. For the README, run `scripts/scenario6_freeze_double_fire.sh` and screenshot that time window.",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 10 },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(chronos_duplicate_trigger_total)",
+          "legendFormat": "duplicate triggers absorbed"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0,
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "stepAfter",
+            "lineWidth": 2,
+            "fillOpacity": 20,
+            "pointSize": 6,
+            "showPoints": "always"
+          },
+          "color": { "mode": "fixed", "fixedColor": "red" }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": { "displayMode": "list", "placement": "bottom", "calcs": ["lastNotNull", "max"] },
+        "tooltip": { "mode": "single", "sort": "none" }
+      }
+    },
+    {
+      "id": 3,
+      "type": "timeseries",
+      "title": "③ Trigger delay — P50 / P99 vs. SLO",
+      "description": "Trigger delay = claim instant − fire_at, measured entirely on the database clock. SLO: P50 ≤ 200ms, P99 ≤ 1s (dashed lines). Both percentile lines should sit below their thresholds. The histogram buckets are placed at 50/100/200/500ms and 1/2/5s specifically so histogram_quantile has resolution at the two SLO points.",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 10 },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "histogram_quantile(0.50, sum(rate(chronos_trigger_delay_seconds_bucket[5m])) by (le))",
+          "legendFormat": "P50"
+        },
+        {
+          "refId": "B",
+          "expr": "histogram_quantile(0.99, sum(rate(chronos_trigger_delay_seconds_bucket[5m])) by (le))",
+          "legendFormat": "P99"
+        },
+        {
+          "refId": "C",
+          "expr": "vector(0.2)",
+          "legendFormat": "SLO — P50 ≤ 200ms"
+        },
+        {
+          "refId": "D",
+          "expr": "vector(1.0)",
+          "legendFormat": "SLO — P99 ≤ 1s"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "min": 0,
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 0,
+            "spanNulls": true
+          }
+        },
+        "overrides": [
+          {
+            "matcher": { "id": "byName", "options": "P50" },
+            "properties": [ { "id": "color", "value": { "mode": "fixed", "fixedColor": "blue" } } ]
+          },
+          {
+            "matcher": { "id": "byName", "options": "P99" },
+            "properties": [ { "id": "color", "value": { "mode": "fixed", "fixedColor": "purple" } } ]
+          },
+          {
+            "matcher": { "id": "byRegexp", "options": "SLO.*" },
+            "properties": [
+              { "id": "custom.lineStyle", "value": { "fill": "dash", "dash": [8, 6] } },
+              { "id": "custom.lineWidth", "value": 1 },
+              { "id": "color", "value": { "mode": "fixed", "fixedColor": "semi-dark-red" } }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "legend": { "displayMode": "list", "placement": "bottom", "calcs": ["lastNotNull"] },
+        "tooltip": { "mode": "multi", "sort": "none" }
+      }
+    },
+    {
+      "type": "row",
+      "title": "Operational — for the 8/26 load test, not the README",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 18 },
+      "id": 101,
+      "collapsed": false
+    },
+    {
+      "id": 4,
+      "type": "timeseries",
+      "title": "Pending tasks per shard — spread (load balance)",
+      "description": "max / avg / min of the per-shard pending gauge. max and min converging = load evenly spread across the 64 shards, which is the thing to prove during the load test. Sampled every 15s — a coarse value, not per-scrape and not exact real-time.",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 19 },
+      "targets": [
+        { "refId": "A", "expr": "max(chronos_tasks_pending)", "legendFormat": "max shard" },
+        { "refId": "B", "expr": "avg(chronos_tasks_pending)", "legendFormat": "avg shard" },
+        { "refId": "C", "expr": "min(chronos_tasks_pending)", "legendFormat": "min shard" }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0,
+          "custom": { "drawStyle": "line", "lineWidth": 2, "fillOpacity": 6 }
+        },
+        "overrides": [
+          { "matcher": { "id": "byName", "options": "max shard" }, "properties": [ { "id": "color", "value": { "mode": "fixed", "fixedColor": "red" } } ] },
+          { "matcher": { "id": "byName", "options": "avg shard" }, "properties": [ { "id": "color", "value": { "mode": "fixed", "fixedColor": "blue" } } ] },
+          { "matcher": { "id": "byName", "options": "min shard" }, "properties": [ { "id": "color", "value": { "mode": "fixed", "fixedColor": "green" } } ] }
+        ]
+      },
+      "options": {
+        "legend": { "displayMode": "list", "placement": "bottom", "calcs": ["max"] },
+        "tooltip": { "mode": "multi", "sort": "none" }
+      }
+    },
+    {
+      "id": 5,
+      "type": "timeseries",
+      "title": "Poll cycle duration — idle cost",
+      "description": "One poll-and-claim cycle, including the path where nothing is due. Stays a cheap bounded index scan (single-digit ms) even at load — that's what the 8/26 test needs to show.",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 19 },
+      "targets": [
+        { "refId": "A", "expr": "histogram_quantile(0.50, sum(rate(chronos_poll_duration_seconds_bucket[5m])) by (le))", "legendFormat": "P50" },
+        { "refId": "B", "expr": "histogram_quantile(0.99, sum(rate(chronos_poll_duration_seconds_bucket[5m])) by (le))", "legendFormat": "P99" }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "min": 0,
+          "custom": { "drawStyle": "line", "lineWidth": 2, "fillOpacity": 8 }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": { "displayMode": "list", "placement": "bottom", "calcs": ["lastNotNull"] },
+        "tooltip": { "mode": "multi", "sort": "none" }
+      }
+    },
+    {
+      "id": 6,
+      "type": "timeseries",
+      "title": "Sink call duration by outcome",
+      "description": "Downstream HTTP callback round trip, split by success / failure.",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 7, "w": 12, "x": 0, "y": 27 },
+      "targets": [
+        { "refId": "A", "expr": "histogram_quantile(0.99, sum(rate(chronos_sink_call_duration_seconds_bucket[5m])) by (le, outcome))", "legendFormat": "P99 {{outcome}}" }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "min": 0,
+          "custom": { "drawStyle": "line", "lineWidth": 2, "fillOpacity": 8 }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": { "displayMode": "list", "placement": "bottom", "calcs": ["lastNotNull"] },
+        "tooltip": { "mode": "multi", "sort": "none" }
+      }
+    },
+    {
+      "id": 7,
+      "type": "timeseries",
+      "title": "Dead-lettered tasks",
+      "description": "Tasks moved to the dead state after exhausting retries (chaos scenario 2). Flat at zero in normal operation.",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 7, "w": 12, "x": 12, "y": 27 },
+      "targets": [
+        { "refId": "A", "expr": "sum(chronos_tasks_dead_total)", "legendFormat": "dead-lettered (cumulative)" }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0,
+          "custom": { "drawStyle": "line", "lineInterpolation": "stepAfter", "lineWidth": 2, "fillOpacity": 20 },
+          "color": { "mode": "fixed", "fixedColor": "dark-red" }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": { "displayMode": "list", "placement": "bottom", "calcs": ["lastNotNull"] },
+        "tooltip": { "mode": "single", "sort": "none" }
+      }
+    }
+  ]
+}

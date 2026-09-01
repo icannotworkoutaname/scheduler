@@ -1,0 +1,24 @@
+global:
+  scrape_interval: 5s
+  evaluation_interval: 5s
+
+scrape_configs:
+  - job_name: chronos
+    metrics_path: /actuator/prometheus
+    static_configs:
+      # both scheduler nodes, running on the host as `java -jar ... --server.port=808x`.
+      # `chronos-node` is an /etc/hosts alias injected via docker-compose extra_hosts:
+      #   native Linux  -> host-gateway (the docker bridge gateway = the host)
+      #   WSL2 + Docker Desktop -> the WSL distro's own IP (scripts/monitoring-up.sh
+      #   writes it to .env), because host.docker.internal there points at Windows,
+      #   which can't reach the app running inside the Linux distro.
+      - targets:
+          - chronos-node:8080
+          - chronos-node:8081
+        labels:
+          app: chronos-scheduler
+    relabel_configs:
+      - source_labels: [__address__]
+        regex: '.*:(\d+)'
+        target_label: node
+        replacement: '${1}'

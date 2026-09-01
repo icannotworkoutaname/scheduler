@@ -15,5 +15,47 @@ services:
       timeout: 3s
       retries: 10
 
+  # The scheduler itself runs on the host (java -jar, ports 8080/8081) so the
+  # chaos scripts can kill -9 / kill -STOP it. Prometheus reaches back to the
+  # host to scrape /actuator/prometheus.
+  prometheus:
+    image: prom/prometheus:v3.1.0
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./grafana/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    extra_hosts:
+      # native Linux: host-gateway. WSL2: scripts/monitoring-up.sh puts the
+      # distro IP in .env as CHRONOS_HOST (host.docker.internal there is Windows).
+      - "chronos-node:${CHRONOS_HOST:-host-gateway}"
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.retention.time=6h
+
+  grafana:
+    image: grafana/grafana:11.4.0
+    ports:
+      - "3000:3000"
+    environment:
+      # one-click open, no login — this is a demo/dev dashboard, not prod
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Admin
+      GF_AUTH_DISABLE_LOGIN_FORM: "true"
+      GF_USERS_DEFAULT_THEME: light
+      # server-side PNG rendering, so 8/28 can script the README screenshots
+      GF_RENDERING_SERVER_URL: http://renderer:8091/render
+      GF_RENDERING_CALLBACK_URL: http://grafana:3000/
+    volumes:
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./grafana/dashboard.json:/var/lib/grafana/dashboards/chronos.json:ro
+    depends_on:
+      - prometheus
+
+  renderer:
+    image: grafana/grafana-image-renderer:3.12.4
+    environment:
+      HTTP_PORT: 8091
+
+
 volumes:
   pg_data:
