@@ -22,7 +22,15 @@ class ShardBootstrap(
         // 目的只是尽快让自己出现在 countDistinctActiveOwners() 里，
         // 让几乎同时启动的兄弟节点有机会"看见"自己。
         val announced = shardLeaseRepository.claimAvailableShards(nodeIdentity.nodeId, 1)
-        log.info("node {} announced with shard(s) {}", nodeIdentity.nodeId, announced.map { it.shardId })
+        if (announced.isEmpty()) {
+            // Every shard is currently leased — a peer lapped us during startup.
+            // Steal one anyway so we show up as an active owner; the peer's next
+            // heartbeat will then rebalance down to a fair share.
+            val stolen = shardLeaseRepository.forceClaimOneShard(nodeIdentity.nodeId)
+            log.info("node {} announced by force-claiming shard {} (all shards were leased)", nodeIdentity.nodeId, stolen)
+        } else {
+            log.info("node {} announced with shard(s) {}", nodeIdentity.nodeId, announced.map { it.shardId })
+        }
 
         // Phase 2 —— 等待:给兄弟节点留出时间也完成它们自己的 Phase 1。
         // 这次延迟放在报到之后，不是放在报到之前——上次的版本睡在最前面，

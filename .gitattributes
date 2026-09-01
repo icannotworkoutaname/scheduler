@@ -9,3 +9,10 @@
 *.sh text eol=lf
 *.py text eol=lf
 *.properties text eol=lf
+# 同理钉死源码/配置/文档，避免经 \\wsl$ 编辑引入的 CRLF 制造无意义的 diff。
+# 不含 *.sql：已应用的迁移文件改行尾会变 Flyway 校验和，触发 checksum mismatch。
+*.kt text eol=lf
+*.kts text eol=lf
+*.yml text eol=lf
+*.yaml text eol=lf
+*.md text eol=lf

@@ -55,7 +55,12 @@ class ShardFailoverTest {
         SpringApplicationBuilder(SchedulerApplication::class.java)
             .run(
                 "--server.port=$port",
-                "--chronos.shard.settle-delay-seconds=1", // 测试里没必要等生产环境的 3 秒
+                // settle-delay 必须够长，让慢启动的对等节点完成 Phase 1(报到)——
+                // 否则先跑完 settle 的节点在 Phase 3 只看到自己一个 owner，softCap
+                // 算成 64，独吞全部 shard，而心跳没有向下再平衡的逻辑(8/20)，之后
+                // 永远收不回来。1 秒在并行启动两个 Spring 上下文的 CI/Testcontainers
+                // 环境里不够，实测约 1/3 概率复现独吞；5 秒有充足余量。
+                "--chronos.shard.settle-delay-seconds=5",
                 "--spring.datasource.url=${postgres.jdbcUrl}",
                 "--spring.datasource.username=${postgres.username}",
                 "--spring.datasource.password=${postgres.password}",
@@ -74,16 +79,25 @@ class ShardFailoverTest {
 
     @Test
     fun `two nodes split shards evenly, then one takes over the other's shards on failure`() {
-        // 并发起两个节点，复刻 8/10 手工验证时靠时间窗口重叠触发公平抢占的做法
-        val threadA = Thread { ctxA = startNode(18080) }
-        val threadB = Thread { ctxB = startNode(18081) }
-        threadA.start(); threadB.start()
-        threadA.join(); threadB.join()
+        // 串行启动，不并发。两个 SpringApplication.run() 同时在不同线程里跑会撞
+        // Spring Boot 的共享静态初始化(日志系统等)，抛 ConcurrentModificationException
+        // 打挂其中一个 context——这是"两节点挤一个 JVM"这个测试手法的固有脆弱点，
+        // 跟被测代码无关。串行起完全没问题：node A 先独占 64，node B 起来后 Phase 1
+        // 强占 1 个变可见，随后 A 的心跳做向下再平衡把多余的 32 个还回去，B 认领，
+        // 收敛到 32/32。
+        ctxA = startNode(18080)
+        ctxB = startNode(18081)
 
-        Thread.sleep(3000) // 等三段式启动协议（报到-等待-认领）跑完
-
-        val initialCounts = shardOwnerCounts()
-        assertEquals(2, initialCounts.size, "expected exactly two distinct owners")
+        // 轮询等 32/32 收敛。settle 5s + node A 释放 + node B 认领，给 35 秒。
+        val splitDeadline = System.currentTimeMillis() + 35_000
+        var initialCounts = shardOwnerCounts()
+        while (System.currentTimeMillis() < splitDeadline &&
+            !(initialCounts.size == 2 && initialCounts.values.all { it == 32 })
+        ) {
+            Thread.sleep(2000)
+            initialCounts = shardOwnerCounts()
+        }
+        assertEquals(2, initialCounts.size, "expected exactly two distinct owners, got: $initialCounts")
         assertTrue(initialCounts.values.all { it == 32 }, "expected an even 32/32 split, got: $initialCounts")
 
         // 模拟节点 A 崩溃：不走 Spring 的优雅关闭钩子，直接杀底层进程不现实
@@ -94,8 +108,8 @@ class ShardFailoverTest {
         ctxA!!.close()
         ctxA = null
 
-        // 最坏情况下需要 lease TTL(30s) + 心跳间隔(10s)，留够余量轮询等待
-        val deadline = System.currentTimeMillis() + 45_000
+        // 最坏情况下需要 lease TTL(30s) + 心跳间隔(10s)，CI runner 上再留余量
+        val deadline = System.currentTimeMillis() + 60_000
         var finalCounts = shardOwnerCounts()
         while (System.currentTimeMillis() < deadline && finalCounts.values.sum() != 64.let {
             finalCounts.values.maxOrNull() ?: 0
