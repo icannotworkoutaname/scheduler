@@ -96,26 +96,31 @@ class SchedulerMetrics(
         )
         .register(registry)
 
-    // --- tasks_pending: per-shard gauge, ADR-004 decision 3 ------------------
-    private val pendingByShard = Array(TOTAL_SHARDS) { AtomicInteger(0) }
+    // --- chronos.tasks.firing: per-shard live-load gauge, ADR-004 decision 3 -
+    // 8/27: renamed from chronos.tasks.pending (never was "total backlog"). It
+    // now counts what each shard is firing right now — cheap (state='firing' is
+    // selective and covered by the partial index), and the live per-shard work
+    // distribution, which is what "are the shards balanced" actually asks. 0 for
+    // every shard at rest, correctly reading as "no load".
+    private val firingByShard = Array(TOTAL_SHARDS) { AtomicInteger(0) }
     private var sampler: ScheduledExecutorService? = null
 
     @PostConstruct
     fun start() {
         for (shard in 0 until TOTAL_SHARDS) {
-            Gauge.builder("chronos.tasks.pending", pendingByShard[shard]) { it.get().toDouble() }
+            Gauge.builder("chronos.tasks.firing", firingByShard[shard]) { it.get().toDouble() }
                 .description(
-                    "pending+retrying tasks in this shard, sampled every ${PENDING_SAMPLE_SECONDS}s — " +
-                        "a coarse observability value, NOT read per scrape and NOT exact real-time"
+                    "tasks this shard is firing right now — the live per-shard load. " +
+                        "Sampled every ${PENDING_SAMPLE_SECONDS}s, not per scrape; 0 everywhere means idle."
                 )
                 .tag("shard", shard.toString())
                 .register(registry)
         }
         // 独立单线程，绝不阻塞共享的 @Scheduled 轮询线程（心跳停顿排查里那条教训）。
         sampler = Executors.newSingleThreadScheduledExecutor { r ->
-            Thread(r, "pending-sampler").apply { isDaemon = true }
+            Thread(r, "firing-load-sampler").apply { isDaemon = true }
         }.also {
-            it.scheduleWithFixedDelay(::samplePending, 0, PENDING_SAMPLE_SECONDS, TimeUnit.SECONDS)
+            it.scheduleWithFixedDelay(::sampleFiring, 0, PENDING_SAMPLE_SECONDS, TimeUnit.SECONDS)
         }
     }
 
@@ -124,14 +129,14 @@ class SchedulerMetrics(
         sampler?.shutdownNow()
     }
 
-    private fun samplePending() {
+    private fun sampleFiring() {
         try {
-            val counts = taskRepository.pendingCountByShard()
+            val counts = taskRepository.firingCountByShard()
             for (shard in 0 until TOTAL_SHARDS) {
-                pendingByShard[shard].set(counts.getOrDefault(shard, 0))
+                firingByShard[shard].set(counts.getOrDefault(shard, 0))
             }
         } catch (e: Exception) {
-            log.warn("pending-tasks sample failed: {}", e.message)
+            log.warn("firing-load sample failed: {}", e.message)
         }
     }
 
@@ -162,10 +167,10 @@ class SchedulerMetrics(
     }
 
     /** Current sampled pending count for a shard — test/diagnostic hook. */
-    fun pendingForShard(shard: Int): Int = pendingByShard[shard].get()
+    fun firingForShard(shard: Int): Int = firingByShard[shard].get()
 
-    /** Force a pending sample now — test hook so a test doesn't wait 15s. */
-    fun sampleNow() = samplePending()
+    /** Force a firing-load sample now — test hook so a test doesn't wait 15s. */
+    fun sampleNow() = sampleFiring()
 
     fun triggerDelayCount(): Long = triggerDelay.count()
     fun triggerDelayMeanSeconds(): Double = triggerDelay.mean(TimeUnit.SECONDS)

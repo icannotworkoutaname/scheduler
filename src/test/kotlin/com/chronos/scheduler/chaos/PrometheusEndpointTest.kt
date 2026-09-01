@@ -34,7 +34,7 @@ class PrometheusEndpointTest {
         val EXPECTED = listOf(
             "chronos_trigger_delay_seconds",
             "chronos_duplicate_trigger_total",
-            "chronos_tasks_pending",
+            "chronos_tasks_firing",
             "chronos_tasks_dead_total",
             "chronos_lease_takeover_total",
             "chronos_sink_call_duration_seconds",
@@ -76,6 +76,21 @@ class PrometheusEndpointTest {
         assertTrue(
             body.contains("""chronos_trigger_delay_seconds_bucket{le="1.0"}"""),
             "trigger_delay is missing the 1s SLO bucket — decision 4"
+        )
+
+        // the firing-load gauge must actually COUNT, not silently swallow a SQL
+        // error and sit at 0 (8/27: an earlier form did exactly that)
+        java.sql.DriverManager.getConnection(postgres.jdbcUrl, postgres.username, postgres.password).use { c ->
+            c.prepareStatement(
+                "INSERT INTO tasks (id, idempotency_key, payload, callback_url, fire_at, state, shard, lease_owner, lease_expires_at) " +
+                    "VALUES (gen_random_uuid(), ?, '{}'::jsonb, 'http://x', now(), 'firing', 9, 'n', now() + interval '30 seconds')"
+            ).use { ps -> repeat(5) { ps.setString(1, "fire-$it"); ps.executeUpdate() } }
+        }
+        val metrics = ctx!!.getBean(com.chronos.scheduler.config.SchedulerMetrics::class.java)
+        metrics.sampleNow()
+        assertTrue(
+            metrics.firingForShard(9) == 5,
+            "chronos_tasks_firing for shard 9 should be 5 after inserting 5 firing rows, got ${metrics.firingForShard(9)}"
         )
     }
 }

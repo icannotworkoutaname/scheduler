@@ -29,9 +29,21 @@ except Exception as e: print(sys.argv[2],'(promql err:',e,')'); sys.exit()
 print(sys.argv[2], [round(float(x['value'][1]),4) if x['value'][1] not in ('NaN','+Inf') else x['value'][1] for x in r] or '(none)')
 " "$1" "${2:-}"
 }
-kill_all() { pkill -9 -f 'scheduler-0.0.1-SNAPSHOT.jar' 2>/dev/null || true; pkill -9 -f 'receiver.py' 2>/dev/null || true; sleep 2; }
+kill_all() { pkill -9 -f 'scheduler-0.0.1-SNAPSHOT.jar' 2>/dev/null || true; pkill -9 -f 'receiver.py' 2>/dev/null || true; docker stop fastsink >/dev/null 2>&1 || true; sleep 2; }
 reset_db() { psql $PGURL -q -c "TRUNCATE tasks;" -c "UPDATE shards SET lease_owner=NULL, lease_expires_at=NULL;"; }
-start_receiver() { nohup python3 scripts/receiver.py --fail-rate 0 > /tmp/loadtest-receiver.log 2>&1 & sleep 1; }
+# CHRONOS_SINK=nginx (default, GIL-free — use for real throughput numbers)
+#            =receiver (Python receiver.py — dedups, but its GIL caps ~1,950/s)
+start_sink() {
+  if [ "${CHRONOS_SINK:-nginx}" = receiver ]; then
+    nohup python3 scripts/receiver.py --fail-rate 0 > /tmp/loadtest-receiver.log 2>&1 & sleep 1
+  else
+    mkdir -p /tmp/fastsink
+    printf 'server {\n  listen 9000 default_server;\n  access_log off;\n  location / { default_type application/json; return 200 "{}"; }\n}\n' > /tmp/fastsink/default.conf
+    docker start fastsink >/dev/null 2>&1 || \
+      docker run -d --name fastsink -p 9000:9000 -v /tmp/fastsink:/etc/nginx/conf.d:ro nginx:alpine >/dev/null
+    sleep 2
+  fi
+}
 start_node() { nohup java -jar "$JAR" --server.port="$1" > "/tmp/loadtest-$1.log" 2>&1 & }
 wait_health() { for _ in $(seq 1 90); do curl -sf "localhost:$1/actuator/health" >/dev/null 2>&1 && return 0; sleep 1; done; echo "[ERR] :$1 never healthy" >&2; return 1; }
 copy_in() { psql $PGURL -c "\copy tasks (id,idempotency_key,payload,callback_url,fire_at,state,shard) FROM '$1' WITH (FORMAT csv)"; psql $PGURL -q -c "VACUUM ANALYZE tasks;"; }
@@ -52,7 +64,7 @@ phase_capacity() {
   python3 scripts/loadtest_gen.py --count 1000000 --prefix cap --spread-seconds 3600 --offset-seconds 300 --out /tmp/cap.csv
   local t0; t0=$(date +%s); copy_in /tmp/cap.csv; echo "COPY 1M + VACUUM in $(( $(date +%s) - t0 ))s"
   phase_plans
-  start_receiver; start_node 8080; start_node 8081; wait_health 8080; wait_health 8081; sleep 8
+  start_sink; start_node 8080; start_node 8081; wait_health 8080; wait_health 8081; sleep 8
   echo "=== idle window (nothing due), sampling 120s ==="
   sleep 120
   promq 'histogram_quantile(0.50, sum(rate(chronos_poll_duration_seconds_bucket[2m])) by (le))' 'idle poll P50 ='
@@ -73,7 +85,7 @@ phase_peak() {
   kill_all; reset_db
   python3 scripts/loadtest_gen.py --count 100000 --prefix peak --at-seconds 50 --out /tmp/peak.csv
   copy_in /tmp/peak.csv
-  start_receiver; start_node 8080; start_node 8081; wait_health 8080; wait_health 8081; sleep 8
+  start_sink; start_node 8080; start_node 8081; wait_health 8080; wait_health 8081; sleep 8
   local fire now; fire=$(psql $PGURL -tAc "SELECT extract(epoch FROM min(fire_at))::int FROM tasks"); now=$(date +%s)
   echo "due in $((fire-now))s — sampling every 3s"
   for i in $(seq 1 40); do
@@ -92,9 +104,14 @@ phase_peak() {
 
 phase_submit() {
   kill_all; reset_db
-  start_receiver; start_node 8080; wait_health 8080; sleep 5
-  python3 scripts/loadtest_submit.py --count 50000 --workers 96 --url http://localhost:8080
-  curl -s http://localhost:8080/actuator/prometheus | grep -E '^hikaricp_connections(_acquire_seconds|_usage_seconds|_timeout|_pending| )' || true
+  start_sink; start_node 8080; wait_health 8080; sleep 5
+  # wrk with unique idempotencyKey per request (scripts/loadtest_submit.lua).
+  # loadtest_submit.py is kept as a fallback but its urllib client plateaus
+  # ~1,450 TPS regardless of the server — see docs/performance.md ③.
+  command -v wrk >/dev/null || { echo "install wrk (apt install wrk)"; exit 1; }
+  wrk -t8 -c96 -d30s --latency -s scripts/loadtest_submit.lua http://localhost:8080/tasks
+  echo "rows in db: $(psql $PGURL -tAc 'SELECT count(*) FROM tasks')  (should ~= completed requests)"
+  curl -s http://localhost:8080/actuator/prometheus | grep -E '^hikaricp_connections(_acquire_seconds_(sum|count|max)|_timeout|_pending| )\{' || true
 }
 
 case "${1:-}" in

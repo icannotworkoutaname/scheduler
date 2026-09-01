@@ -181,14 +181,14 @@
     {
       "id": 4,
       "type": "timeseries",
-      "title": "Pending tasks per shard — spread (load balance)",
-      "description": "max / avg / min of the per-shard pending gauge. max and min converging = load evenly spread across the 64 shards, which is the thing to prove during the load test. Sampled every 15s — a coarse value, not per-scrape and not exact real-time.",
+      "title": "Firing tasks per shard — spread (load balance)",
+      "description": "max / avg / min of the per-shard firing gauge (tasks each shard is firing right now). max and min converging = live work evenly spread across the 64 shards. 0 everywhere = idle. Sampled every 15s.",
       "datasource": { "type": "prometheus", "uid": "prometheus" },
       "gridPos": { "h": 8, "w": 12, "x": 0, "y": 19 },
       "targets": [
-        { "refId": "A", "expr": "max(chronos_tasks_pending)", "legendFormat": "max shard" },
-        { "refId": "B", "expr": "avg(chronos_tasks_pending)", "legendFormat": "avg shard" },
-        { "refId": "C", "expr": "min(chronos_tasks_pending)", "legendFormat": "min shard" }
+        { "refId": "A", "expr": "max(chronos_tasks_firing)", "legendFormat": "max shard" },
+        { "refId": "B", "expr": "avg(chronos_tasks_firing)", "legendFormat": "avg shard" },
+        { "refId": "C", "expr": "min(chronos_tasks_firing)", "legendFormat": "min shard" }
       ],
       "fieldConfig": {
         "defaults": {

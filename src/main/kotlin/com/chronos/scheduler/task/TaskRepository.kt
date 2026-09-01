@@ -93,13 +93,25 @@ class TaskRepository(private val jdbcClient: JdbcClient) {
 
     /**
      * requirements.md §9 / ADR-004 decision 3: backing query for the per-shard
-     * tasks_pending gauge. Deliberately called on a slow cadence (every 15s from
-     * SchedulerMetrics' own thread), never per Prometheus scrape — a
-     * count-GROUP-BY over a million-row table is a load source in its own right.
+     * live-load gauge, every 15s from SchedulerMetrics' own thread.
+     *
+     * 8/27, two dead ends before this: the original
+     * `WHERE state IN (pending,retrying) GROUP BY shard` is a 91ms parallel
+     * full-table Seq Scan at 1M rows (`state` matches ~everything, no `shard =`
+     * to seek on). Bounding it to "due in the next 5 min" only made it worse
+     * (300ms) — under a real drain that window holds tens of thousands of rows
+     * and an exact count is O(matches).
+     *
+     * What's actually cheap AND the right question: how many rows each shard is
+     * firing *right now*. `state = 'firing'` is highly selective (backpressure
+     * caps it at a few thousand total), the partial index
+     * `tasks_firing_lease_expires_idx WHERE state = 'firing'` covers it, and the
+     * count is the live per-shard work distribution — 0 for every shard when
+     * idle, which correctly reads as "no load". ~0.9ms at rest, ~15ms mid-burst.
      */
-    fun pendingCountByShard(): Map<Int, Int> =
+    fun firingCountByShard(): Map<Int, Int> =
         jdbcClient.sql(
-            "SELECT shard, count(*) c FROM tasks WHERE state IN ('pending', 'retrying') GROUP BY shard"
+            "SELECT shard, count(*) c FROM tasks WHERE state = 'firing' GROUP BY shard"
         )
             .query { rs, _ -> rs.getInt("shard") to rs.getInt("c") }
             .list()

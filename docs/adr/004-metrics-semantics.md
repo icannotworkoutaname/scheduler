@@ -47,19 +47,27 @@ already `succeeded` → counted. The receiver's `/stats` `duplicate_triggers`
 
 Name is `duplicate_trigger_total`, help text says "absorbed", not "prevented".
 
-## Decision 3 — `tasks_pending` is a sampled approximation, not a live value
+## Decision 3 — `chronos.tasks.imminent` (per-shard) — sampled, and near-term only
 
-Per-shard gauge (`tag: shard`, 64 series). A gauge that ran
-`SELECT count(*) ... GROUP BY shard` on every Prometheus scrape would be a
-load source in its own right at 8/26's million-row scale, competing with the
-very thing 8/26 measures.
+Per-shard gauge (`tag: shard`, 64 series). Two things keep it from being a load
+source in its own right at a million rows:
 
-So: one background sample every **15s** (`SchedulerMetrics`, on its own
-single daemon thread — never the shared `@Scheduled` poll thread), writing
-into `AtomicInteger[64]` that the gauges read. Help text says so explicitly:
-"sampled every 15s — a coarse observability value, NOT read per scrape and NOT
-exact real-time". The 8/28 "load per shard" chart is a trend, not a
-dashboard needle.
+1. **Sampled, not per-scrape.** One background sample every **15s**
+   (`SchedulerMetrics`, on its own single daemon thread — never the shared
+   `@Scheduled` poll thread), written into `AtomicInteger[64]` that the gauges
+   read.
+2. **Live firing count, not backlog** (8/27). The original counted every
+   pending/retrying row — a 91ms parallel full-table Seq Scan at 1M rows
+   (`state` matches ~everything, no `shard =` to seek on). Bounding it to "due
+   in the next 5 min" made it *worse* (300ms) — under a real drain that window
+   holds tens of thousands of rows and an exact count is O(matches). What is
+   both cheap and the right question: **how many rows each shard is firing
+   right now.** `state = 'firing'` is selective (backpressure caps total firing
+   at a few thousand), the partial index `tasks_firing_lease_expires_idx`
+   covers it, and it is the live per-shard work distribution — 0 everywhere
+   when idle, which correctly reads as "no load". ~0.9ms at rest, ~15ms
+   mid-burst. Renamed `tasks_pending` → `tasks_firing`. `docs/performance.md`
+   has the before/after plan numbers.
 
 ## Decision 4 — `trigger_delay_seconds` uses explicit histogram buckets
 
