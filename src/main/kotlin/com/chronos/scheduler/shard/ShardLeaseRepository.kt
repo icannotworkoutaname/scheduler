@@ -101,15 +101,21 @@ class ShardLeaseRepository(
     }
 
     /**
-     * Give up shards beyond `keep`, highest shard_id first. This is what makes
-     * a bad start (or any transient imbalance) self-heal. If a node claimed
-     * more than its fair share during the announce race — it ran Phase 3
-     * before a slow-booting peer finished Phase 1, saw only itself as active,
-     * and computed softCap = TOTAL_SHARDS — its next heartbeat sees
-     * renewed > softCap and releases the excess here. Without this the
-     * imbalance is permanent (8/20): the over-holder never drops below softCap
-     * on its own, and the under-holder's claim query finds nothing available
-     * because every shard still has a live lease.
+     * Keep the `keep` highest-numbered shards this node holds, release the
+     * rest (ORDER BY shard_id DESC OFFSET :keep). This is what makes a bad
+     * start — or any transient over-hold — self-heal. If a node claimed more
+     * than its fair share during the announce race (ran Phase 3 before a
+     * slow-booting peer finished Phase 1, saw only itself as active, computed
+     * softCap = TOTAL_SHARDS), its next heartbeat sees renewed > softCap and
+     * releases exactly the overage here. Without this the imbalance is
+     * permanent (8/20): the over-holder never drops below softCap on its own,
+     * and the under-holder's claim query finds nothing available.
+     *
+     * It releases the EXACT overage (`held - keep`), never more, and the
+     * heartbeat only ever claims up to `softCap - held`, never more — so with
+     * N healthy nodes and Σ held = 64 ≤ N·softCap the released shards are
+     * always ≤ what the under-holders want, nothing overshoots, and the split
+     * converges to a fixed point (proven out by ShardRebalanceConvergenceTest).
      *
      * Releasing is as safe as a takeover: shards carry no in-flight state,
      * only tasks do, and task leases are independently version-guarded.

@@ -50,6 +50,10 @@ jobs:
       # 5's "reclaim on lost connection" is the same reaper path as 2, and 6's
       # "stale-version write is a no-op" is the same optimistic lock asserted
       # throughout.
+      #
+      # ShardRebalanceConvergenceTest guards the 8/23 rebalance fix: with 3
+      # nodes the downward release path actually runs, and this asserts the
+      # split converges AND then stops moving (no oscillation).
       - name: Run tests
         run: ./gradlew test --no-daemon
 
