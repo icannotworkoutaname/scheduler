@@ -52,6 +52,8 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         if self.path == "/stats":
             self._handle_stats()
+        elif self.path == "/seen":
+            self._handle_seen()
         else:
             self.send_response(404)
             self.end_headers()
@@ -124,6 +126,17 @@ class Handler(BaseHTTPRequestHandler):
             "dedup_enabled": dedup_enabled,
             "response_delay_seconds": response_delay_seconds,
         }).encode())
+
+    def _handle_seen(self):
+        # 场景 4(取消/触发竞态)要精确核对"某个具体 triggerId 到底有没有被真正
+        # 执行过"，/stats 只有汇总数字不够——必须能对单个 id 交叉验证，才能
+        # 排除"客户端以为自己赢了、但服务端其实两边都做了"这种最危险的不一致。
+        with lock:
+            payload = json.dumps(sorted(seen_trigger_ids)).encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.end_headers()
+        self.wfile.write(payload)
 
     def _handle_stats(self):
         with lock:

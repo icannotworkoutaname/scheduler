@@ -157,3 +157,68 @@ configure_receiver() {
 json_field() {
   python3 -c "import json,sys; print(json.load(sys.stdin).get('$1',''))"
 }
+
+# 从多个 JSON 文件里取某字段的去重值个数。场景 3 用它确认 20 个并发重复提交
+# 只产生了 1 个 taskId。
+distinct_json_field_count() {
+  local field=$1
+  shift
+  python3 -c '
+import json, sys
+field = sys.argv[1]
+vals = set()
+for path in sys.argv[2:]:
+    with open(path) as f:
+        vals.add(json.load(f).get(field))
+print(len(vals))
+' "$field" "$@"
+}
+
+# stdin 是一个 JSON 数组，判断 $1 是否是其成员，打印 true/false。场景 4 用它
+# 对着 receiver 的 /seen 交叉核对某个 triggerId 到底有没有被真正执行。
+json_array_contains() {
+  python3 -c '
+import json, sys
+arr = json.load(sys.stdin)
+print("true" if sys.argv[1] in arr else "false")
+' "$1"
+}
+
+# ---- 场景 5(网络分区)：用户态 TCP 转发作为 node A -> Postgres 的可控中间点 ----
+# 两个应用实例跑在同一个 WSL 用户空间、共享网络命名空间，iptables 按进程隔断
+# 做不到干净隔离，而且要 root。改用转发进程：node A 只走它，node B 直连，
+# 冻结/解冻这个进程就等于精确地分区/恢复单个节点。
+_CHAOS_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+DB_PROXY_PORT=15432
+DB_PROXY_PID=""
+
+start_db_proxy() {
+  python3 "${_CHAOS_DIR}/db_proxy.py" --listen-port "$DB_PROXY_PORT" --target-port 5432 \
+    > /tmp/scenario5-db-proxy.log 2>&1 &
+  DB_PROXY_PID=$!
+  local i
+  for i in $(seq 1 25); do
+    if bash -c "exec 3<>/dev/tcp/127.0.0.1/${DB_PROXY_PORT}" 2>/dev/null; then
+      return 0
+    fi
+    sleep 0.2
+  done
+  echo "[ERROR] db_proxy did not start listening on :${DB_PROXY_PORT}" >&2
+  return 1
+}
+
+# 冻结转发进程：两个方向的字节静默停止流动，socket 不关闭——真实网络分区的
+# 样子(包被丢弃而非被拒绝)。已建立的 JDBC 连接会一直等到 socketTimeout。
+partition_db_proxy() { kill -STOP "$DB_PROXY_PID" 2>/dev/null || true; }
+heal_db_proxy()      { kill -CONT "$DB_PROXY_PID" 2>/dev/null || true; }
+stop_db_proxy() {
+  [ -n "$DB_PROXY_PID" ] || return 0
+  kill -CONT "$DB_PROXY_PID" 2>/dev/null || true
+  kill -9 "$DB_PROXY_PID" 2>/dev/null || true
+  return 0
+}
+
+shard_count_for_owner() {
+  PGPASSWORD=scheduler psql -h localhost -U scheduler -d scheduler -t -A -c \
+    "SELECT count(*) FROM shards WHERE lease_owner = '$1' AND lease_expires_at >= now();"
+}
