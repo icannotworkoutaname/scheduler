@@ -2,6 +2,7 @@ package com.chronos.scheduler.task
 
 import com.chronos.scheduler.sink.RetryPolicy
 import org.postgresql.util.PGobject
+import org.springframework.beans.factory.annotation.Value
 import org.springframework.jdbc.core.simple.JdbcClient
 import org.springframework.stereotype.Repository
 import java.sql.Timestamp
@@ -23,7 +24,18 @@ data class ClaimedTask(val task: Task, val dbFiredAt: Instant) {
 }
 
 @Repository
-class TaskRepository(private val jdbcClient: JdbcClient) {
+class TaskRepository(
+    private val jdbcClient: JdbcClient,
+    /**
+     * How long a claimed task stays 'firing' before the reaper may reclaim it.
+     * Default 30s (requirements.md §6). Configurable so `make demo` / the
+     * accelerated tests can shrink the "wait for the lease to expire" step from
+     * ~40s to a few seconds — the mechanism is identical, only the clock is
+     * faster. Production stays 30s.
+     */
+    @Value("\${chronos.task.lease-ttl-seconds:30}")
+    private val taskLeaseTtlSeconds: Long = 30,
+) {
 
     /**
      * Submit-side idempotency (requirements.md §3, layer 1): if idempotencyKey
@@ -67,7 +79,7 @@ class TaskRepository(private val jdbcClient: JdbcClient) {
             UPDATE tasks
                SET state = 'firing',
                    lease_owner = :leaseOwner,
-                   lease_expires_at = now() + interval '30 seconds',
+                   lease_expires_at = now() + (:ttlSeconds * interval '1 second'),
                    version = version + 1,
                    attempt_count = attempt_count + 1
              WHERE id IN (
@@ -85,6 +97,7 @@ class TaskRepository(private val jdbcClient: JdbcClient) {
             .param("leaseOwner", leaseOwner)
             .param("shards", shards)
             .param("limit", limit)
+            .param("ttlSeconds", taskLeaseTtlSeconds)
             .query { rs, rowNum ->
                 ClaimedTask(mapRow(rs, rowNum), rs.getTimestamp("db_fired_at").toInstant())
             }

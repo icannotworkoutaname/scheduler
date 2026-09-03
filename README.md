@@ -67,6 +67,27 @@ java -jar build/libs/scheduler-0.0.1-SNAPSHOT.jar --server.port=8081 &
 - On WSL2 run `scripts/monitoring-up.sh` instead of `docker compose up` — it
   pins the Prometheus scrape target to the distro IP.
 
+### One-command demo
+
+```bash
+make demo         # accelerated: 8 s lease TTL, ~2 min end to end
+make demo-slow    # production timings: 30 s lease TTL
+```
+
+Brings up Postgres, builds the jar, starts a downstream receiver and two nodes,
+waits for the shards to split, then runs the node-freeze scenario and prints a
+result table (`chronos_duplicate_trigger_total`, business actions, tasks
+lost/stuck). One command, no manual steps; `trap` cleans up every process on any
+exit path. `make demo-down` stops the compose stack.
+
+## Kubernetes
+
+`k8s/chronos.yaml` runs the scheduler as a plain `replicas: 2` Deployment (plus
+an ephemeral Postgres) — no StatefulSet, no leader election. Build steps are in
+the file header. K8s deployment demonstrates orchestrability; the chaos
+scenarios are validated in the local compose environment (`make demo`), not
+here.
+
 ## Design decisions
 
 Recorded as ADRs under [`docs/adr/`](docs/adr). Current:

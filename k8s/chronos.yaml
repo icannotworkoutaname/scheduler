@@ -1,0 +1,117 @@
+# Chronos on Kubernetes — demonstrates that the scheduler orchestrates as a
+# plain stateless Deployment: N identical replicas, no leader election, no
+# StatefulSet, no per-pod config. The shard-leasing protocol handles a replica
+# appearing or disappearing on its own.
+#
+#   ./gradlew bootJar
+#   docker build -t chronos:latest .
+#   kind load docker-image chronos:latest     # or: minikube image load / push to a registry
+#   kubectl apply -f k8s/chronos.yaml
+#   kubectl port-forward svc/chronos 8080:8080
+#
+# The chaos scenarios are NOT run here — `kill -STOP` under an orchestrator has
+# different semantics (the kubelet would restart the pod). They're validated in
+# the local compose environment; see `make demo`.
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: chronos-config
+data:
+  SPRING_DATASOURCE_URL: "jdbc:postgresql://postgres:5432/scheduler?connectTimeout=5&socketTimeout=5"
+  SPRING_DATASOURCE_USERNAME: "scheduler"
+  SPRING_DATASOURCE_PASSWORD: "scheduler"
+---
+# Ephemeral Postgres — this manifest is about orchestrating the scheduler, not
+# running a production database. Use a managed instance or an operator for real.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: postgres
+spec:
+  replicas: 1
+  selector:
+    matchLabels: { app: postgres }
+  template:
+    metadata:
+      labels: { app: postgres }
+    spec:
+      containers:
+        - name: postgres
+          image: postgres:16-alpine
+          env:
+            - { name: POSTGRES_DB, value: scheduler }
+            - { name: POSTGRES_USER, value: scheduler }
+            - { name: POSTGRES_PASSWORD, value: scheduler }
+            - { name: PGDATA, value: /var/lib/postgresql/data/pgdata }
+          ports:
+            - containerPort: 5432
+          readinessProbe:
+            exec:
+              command: ["pg_isready", "-U", "scheduler", "-d", "scheduler"]
+            periodSeconds: 5
+          volumeMounts:
+            - { name: data, mountPath: /var/lib/postgresql/data }
+      volumes:
+        - name: data
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgres
+spec:
+  selector: { app: postgres }
+  ports:
+    - port: 5432
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: chronos
+spec:
+  replicas: 2
+  selector:
+    matchLabels: { app: chronos }
+  template:
+    metadata:
+      labels: { app: chronos }
+    spec:
+      containers:
+        - name: chronos
+          image: chronos:latest
+          imagePullPolicy: IfNotPresent
+          envFrom:
+            - configMapRef: { name: chronos-config }
+          ports:
+            - containerPort: 8080
+          # Flyway runs on startup and the first pod takes an advisory lock, so
+          # the readiness gate is generous. Once ready the pod has announced and
+          # been assigned its fair share of shards.
+          # Boot under the CPU request below can take ~60 s (Flyway + the first
+          # pod taking the migration advisory lock), so both probes start late
+          # and the liveness gate is slack enough not to kill a slow-but-healthy
+          # start.
+          readinessProbe:
+            httpGet: { path: /actuator/health, port: 8080 }
+            initialDelaySeconds: 20
+            periodSeconds: 5
+            failureThreshold: 24
+          livenessProbe:
+            httpGet: { path: /actuator/health, port: 8080 }
+            initialDelaySeconds: 90
+            periodSeconds: 10
+            failureThreshold: 6
+          resources:
+            requests: { cpu: 250m, memory: 512Mi }
+            limits: { memory: 768Mi }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: chronos
+spec:
+  selector: { app: chronos }
+  ports:
+    - port: 8080
+      targetPort: 8080
