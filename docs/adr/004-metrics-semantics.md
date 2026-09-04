@@ -1,6 +1,6 @@
 # ADR-004: Metrics semantics (requirements.md §9)
 
-Status: accepted (8/24)
+Status: accepted (8/24); decisions 5–7 added 9/5
 
 Block 5 shifts from "prove the system is correct" to "make its correctness
 externally visible". Four of the seven §9 metrics carry a semantic decision
@@ -47,7 +47,7 @@ already `succeeded` → counted. The receiver's `/stats` `duplicate_triggers`
 
 Name is `duplicate_trigger_total`, help text says "absorbed", not "prevented".
 
-## Decision 3 — `chronos.tasks.imminent` (per-shard) — sampled, and near-term only
+## Decision 3 — `chronos.tasks.firing` (per-shard) — sampled, and live-load not backlog
 
 Per-shard gauge (`tag: shard`, 64 series). Two things keep it from being a load
 source in its own right at a million rows:
@@ -78,6 +78,81 @@ points (200ms, 1s) have a boundary on each side, so `histogram_quantile()` has
 resolution exactly where the 8/28 precision histogram and the P99 number need
 it. `sink_call_duration_seconds` and `poll_duration_seconds` get explicit
 buckets too, sized to their own ranges.
+
+## Decision 5 — scenario 6 recovery is dominated by the shard lease, not the task lease
+
+Both leases are nominally 30s, so a naive estimate adds them: task lease
+expires, reaper takes ≤5s to notice, shard lease also needs to expire, another
+node's heartbeat takes ≤10s to notice — plan.md's original ~50s blind-sleep
+estimate summed them. That's wrong: the two clocks run **in parallel**, not in
+series, so the recovery time is `max(...)` of the two chains, not their sum.
+
+```
+shard lease expiry (≤30s) + heartbeat discovery (≤10s)  → survivor eligible, ≤40s
+task lease expiry (30s)   + reaper sweep (≤5s)           → row back to pending, ≤35s  (runs concurrently with the above)
+                                                          → survivor's poll picks it up, ≤0.2s
+                                                          + whatever the downstream itself takes
+```
+
+Worst case is `max(40, 35) + 0.2 + downstream`, not `40 + 35 + downstream`.
+`scripts/scenario6_freeze_double_fire.sh` derives this in comment form and
+waits on the fact ("task reached `succeeded`") instead of a blind sleep for
+exactly this reason. Measured (9/4 rerun, 8s artificial downstream delay,
+otherwise production 30s/10s/5s timings): **41s** frozen-to-recovered, inside
+the ~48s derived worst case.
+
+Why this belongs here and not only in the shard-lease ADR: it's the reason
+`trigger_delay` and `duplicate_trigger_total` behave the way they do during a
+freeze — both are gated by whichever clock is slower, and a metrics reader
+who assumes the two TTLs add will misjudge how long a real freeze-recovery
+takes.
+
+## Decision 6 — scenario 4 (cancel-vs-fire) proves outcome consistency, not race arbitration
+
+What chaos scenario 4 demonstrates: whichever of "cancel" or "fire" wins, the
+HTTP response, the DB row's terminal state, and the receiver's `/seen` record
+all agree with each other. It does **not** demonstrate winning a true
+millisecond-scale simultaneous collision — the test constructs a straddle (one
+half of the cases pre-positioned to land just before `fire_at`, the other
+half just after) rather than firing both branches at the exact same instant.
+
+The actual race guarantee doesn't come from timing a test precisely enough to
+hit a window — it comes from `UPDATE tasks SET state='cancelled' WHERE
+state='pending' AND version=:v` (and the equivalent claim-then-fire path)
+being unconditionally correct by construction: only one of the two conditional
+updates can ever match a given row, regardless of how close in time they run.
+The test's job is to sample both sides of the straddle and check the three
+systems agree, not to prove the arbitration itself — that's Postgres row
+locking, not application code.
+
+**Don't write "we tested the actual race" anywhere reader-facing** — the
+honest claim is "outcome consistency verified across the boundary; the
+mutual-exclusion guarantee is `WHERE version=?`, proven by construction."
+
+## Decision 7 — two different re-fires must not be conflated
+
+`duplicate_trigger_total` counting up during a chaos run can mean two very
+different things, and a reader who can't tell them apart will misread a
+healthy peak-load run as broken:
+
+- **Failure re-fire** (scenario 6): a node froze/died past its lease; another
+  node correctly re-fires its in-flight task. This is the system working —
+  every increment here is one duplicate correctly absorbed instead of a task
+  getting lost.
+- **Self-induced re-fire** (found during 8/27 peak-load tuning): under load,
+  claiming due tasks faster than the worker pool can fire them lets `firing`
+  rows pile up past their own lease TTL — the reaper then hands a task that
+  was never actually stuck to a second claim, purely because the first claim
+  hadn't finished yet. This is a capacity problem wearing the same counter.
+  Backpressure (`fireCapacity()` bounding claims to the executor's free
+  capacity) took this from ~2,000 re-fires down to 0
+  in the 8/27 peak run, with zero code changes to the failure path above.
+
+Same metric, same absorption mechanism, unrelated causes. A dashboard or
+README that shows `duplicate_trigger_total` rising must say which one it's
+demonstrating — flat-at-zero except during a named chaos scenario is the
+signature of the first; any nonzero rate during ordinary peak load is the
+second, and a bug to chase, not a feature to show off.
 
 ## The other three metrics (no decision needed)
 

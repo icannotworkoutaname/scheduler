@@ -92,12 +92,25 @@ here.
 
 Recorded as ADRs under [`docs/adr/`](docs/adr). Current:
 
+- **[001 — polling, not a timing wheel](docs/adr/001-polling-not-timing-wheel.md)**
+  — an in-memory wheel would be faster in principle but adds a cascade,
+  a rebuild-on-rebalance, and a second copy of state to keep consistent with
+  Postgres; a plain poll against an index costs 3.0ms idle, unchanged from
+  empty DB to 1M rows.
+- **[003 — shard-level lease, no leader](docs/adr/003-shard-level-lease.md)** —
+  64 fixed shards, leaseless coordination via the `shards` table; proven to
+  converge without oscillation both in a chaos test and in a real K8s rolling
+  restart (4 owners → 2, zero pod restarts).
 - **[004 — metrics semantics](docs/adr/004-metrics-semantics.md)** — why each of
   the seven metrics is measured the way it is: trigger delay on the *database*
   clock (so a skewed node can't distort it); `duplicate_trigger` counts a
-  duplicate being *absorbed*, not one prevented; the per-shard gauge is the live
-  firing count, not the backlog (an exact backlog count is a full-table scan at
-  scale).
+  duplicate being *absorbed*, not one prevented, and why that counter means two
+  different things during a freeze vs. under peak load; the per-shard gauge is
+  the live firing count, not the backlog.
+- **[005 — clock injection for chaos scenarios 7/8](docs/adr/005-clock-model.md)**
+  — `java.time.Clock` as the only injection seam, and why the heartbeat's 1/3
+  drift-collapse coefficient is measured while the equivalent sink-timeout
+  coefficient is only derived.
 
 ## Chaos scenarios
 
