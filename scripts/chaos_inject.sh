@@ -55,9 +55,16 @@ reset_environment() {
 # 的租约，Phase 1 的"报到"抢不到 shard，公平分配从一开始就是歪的。
 #
 # 注意它为什么不能被塞进 reset_environment()：场景 1/2 是对着**已经在跑**的
-# 节点调用 reset_environment 的，对它们清空租约等于把唯一保证公平的机制
-# （启动时那次"报到-等待-认领"协议）绕过去，之后只能指望心跳去抢救，而心跳
-# 从设计上就不保证公平（8/20 复盘）。"清任务"和"清 shard"必须保持是两件事。
+# 节点调用 reset_environment 的，对它们清空租约等于把启动时那次"报到-等待-
+# 认领"协议绕过去，改成从心跳收敛。
+#
+# 8/20 复盘时这条理由更重：当时心跳只会续约、不会主动纠偏，"绕过启动协议"
+# 就等于把公平性完全押在后面的意外事件上。8/23 补上 releaseExcessShards
+# （见 ADR-003）之后心跳本身也会主动下调超额持有——收敛慢一拍（多等 1-2 个
+# 心跳周期，~10-20s），但不再是"设计上不保证"，只是"比启动协议慢"。所以这
+# 里仍然分成两个函数，但现在的理由是"别在已经在跑的节点身上无谓地制造一次
+# 可避免的再平衡抖动"，不是"否则公平性没人管"。"清任务"和"清 shard"仍然保
+# 持是两件事。
 reset_shard_leases() {
   PGPASSWORD=scheduler psql -h localhost -U scheduler -d scheduler -c \
     "UPDATE shards SET lease_owner = NULL, lease_expires_at = NULL;" > /dev/null
