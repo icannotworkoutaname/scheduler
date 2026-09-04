@@ -5,6 +5,9 @@ build/
 # written by scripts/monitoring-up.sh with the machine's WSL IP
 .env
 
+# NTFS alternate-data-stream marker, leaks in on files copied from Windows
+*:Zone.Identifier
+
 # throwaway dashboard renders — regenerated per run, will go stale
 grafana/samples/
 !gradle/wrapper/gradle-wrapper.jar

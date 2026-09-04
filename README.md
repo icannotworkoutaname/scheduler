@@ -49,8 +49,9 @@ tasks whose `shard = hash(id) % 64` it currently owns. There is no leader — th
 - **Retry / dead-letter** — failed callbacks retry with exponential backoff,
   then move to `dead`.
 
-The full requirements and state machine live in a design doc kept outside the
-repo; the ADRs below capture the decisions that shaped the code.
+The full requirements and state machine live in
+[`docs/requirements.md`](docs/requirements.md); the ADRs below capture the
+decisions that shaped the code.
 
 ## Running it
 
