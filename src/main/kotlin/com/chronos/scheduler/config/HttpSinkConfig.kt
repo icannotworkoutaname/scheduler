@@ -11,11 +11,10 @@ import java.time.Duration
 class HttpSinkConfig {
 
     /**
-     * requirements.md §7.5: sink timeout (10s) must be strictly below the lease
-     * TTL (30s), so ordinary slow downstreams never cause a takeover. Both the
-     * connection and the response-wait timeout are set here — a downstream that
-     * accepts the TCP connection but never responds is just as dangerous as one
-     * that's unreachable.
+     * requirements.md §7.5: the sink timeout (10s) must be strictly below the
+     * lease TTL (30s), so ordinary slow downstreams never cause a takeover. Both
+     * the connect and the read timeout are set: a downstream that accepts the
+     * connection and never responds is as damaging as one that is unreachable.
      */
     @Bean
     fun sinkRestClient(): RestClient {

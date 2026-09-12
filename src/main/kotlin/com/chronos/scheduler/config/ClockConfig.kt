@@ -10,18 +10,17 @@ import java.time.Duration
 class ClockConfig {
 
     /**
-     * The single source of truth for "now" across the app. Every place that
-     * needs the current time takes this as a constructor dependency instead of
-     * calling Instant.now() directly — that's what lets chaos scenario 7/8
-     * (requirements.md §10) inject an offset or drifting Clock at test time
-     * without touching business logic.
+     * The single source of "now" across the app. Every component that needs the
+     * current time takes this as a constructor dependency rather than calling
+     * Instant.now(), which is what lets scenarios 7 and 8 (requirements.md §10)
+     * inject an offset or drifting Clock without touching business logic.
      *
-     * offset-seconds: a fixed skew (scenario 7). Correctness never depends on
-     *   it — fire_at / lease_expires_at comparisons all run in Postgres — so
-     *   this only shifts the ±1s..±30d submission-validation window.
-     * drift-rate: wall-clock runs at this multiple of real time (scenario 8).
-     *   Only meaningful once something derives a *duration* from this Clock;
-     *   ShardHeartbeat's renewal deadline is that something.
+     * offset-seconds: a fixed skew (scenario 7). Correctness does not depend on
+     *   it, since fire_at and lease_expires_at comparisons run in Postgres; it
+     *   only shifts the 1s..30d submission-validation window.
+     * drift-rate: this clock advances at this multiple of real time (scenario
+     *   8). It matters only where a duration is derived from this Clock, which
+     *   today is ShardHeartbeat's renewal deadline.
      */
     @Bean
     fun clock(

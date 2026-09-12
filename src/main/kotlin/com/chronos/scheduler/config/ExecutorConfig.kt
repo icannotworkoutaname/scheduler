@@ -13,18 +13,16 @@ class ExecutorConfig {
     /**
      * The pool that claimed tasks are handed to for firing.
      *
-     * 8/27: was `Executors.newFixedThreadPool(16)` — a fixed pool with an
-     * *unbounded* queue. Under a burst the poll loop kept claiming 500/poll/node
-     * regardless of whether the pool could keep up, so `firing` rows piled to
-     * 60–70 k and (with a slow downstream) their 30 s leases expired mid-queue →
-     * a self-inflicted re-fire storm.
+     * The queue is bounded. With the earlier fixed pool and its unbounded queue,
+     * the poll loop kept claiming 500 per poll per node regardless of whether
+     * the pool could keep up: `firing` rows reached 60–70 k and, against a slow
+     * downstream, their 30s leases expired while still queued, producing a
+     * self-inflicted re-fire storm (docs/performance.md §2).
      *
-     * Now a `ThreadPoolExecutor` with a **bounded** queue, exposed as its
-     * concrete type so PollingLoop can read `queue.remainingCapacity()` and
-     * claim only what there is room to fire (`chronos.poll.claim-limit` becomes
-     * a ceiling, not a fixed amount). `CallerRunsPolicy` is the belt-and-braces
-     * case: if the estimate is ever wrong and a submit would overflow, it runs
-     * on the poll thread, which stalls claiming until the pool drains — a due
+     * Exposed as the concrete ThreadPoolExecutor so PollingLoop can read
+     * queue.remainingCapacity() and claim only what there is room to fire.
+     * CallerRunsPolicy covers the case where that estimate is wrong: the submit
+     * runs on the poll thread, stalling claiming until the pool drains, so a due
      * task is never dropped.
      */
     @Bean(destroyMethod = "shutdown")

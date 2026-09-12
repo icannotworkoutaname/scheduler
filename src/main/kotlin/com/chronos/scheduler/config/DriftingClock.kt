@@ -9,13 +9,12 @@ import java.time.ZoneId
  * A Clock whose observed time advances at `rate` × real time. rate < 1 means
  * this node's clock runs slow: its "10 seconds" takes 10/rate real seconds.
  *
- * chaos scenario 8 (8/23, clock drift). The heartbeat renewal cadence is
- * derived from the injected Clock (see ShardHeartbeat), but the shard lease
- * TTL is still measured by the database's own clock (ShardLeaseRepository's
- * `now() + interval`). So a node running at `rate` renews every
- * period/rate real seconds against a TTL that is still a fixed number of real
- * seconds. The design's safety margin — renew every 10s, lease lasts 30s, so
- * tolerate two missed renewals — collapses exactly when
+ * Chaos scenario 8. The heartbeat renewal cadence is derived from the injected
+ * Clock (see ShardHeartbeat), while the shard lease TTL is measured by the
+ * database clock (ShardLeaseRepository's `now() + interval`). A node running at
+ * `rate` therefore renews every period/rate real seconds against a TTL that is
+ * still a fixed number of real seconds. The safety margin — renew every 10s
+ * against a 30s lease, tolerating two missed renewals — collapses when
  *
  *     period / rate  =  ttl        →  rate = period / ttl = 10 / 30 = 1/3
  *

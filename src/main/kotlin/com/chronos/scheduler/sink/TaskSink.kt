@@ -9,11 +9,10 @@ data class SinkResult(
 
 interface TaskSink {
     /**
-     * attempt is passed separately from triggerId on purpose — it travels in
-     * its own header for observability only (requirements.md §3: "must never
-     * participate in deduplication"). Keeping them as two distinct parameters
-     * here, rather than one bundled object, makes it structurally awkward to
-     * accidentally derive triggerId from attempt somewhere downstream.
+     * attempt is separate from triggerId on purpose: it travels in its own
+     * header for observability and must never participate in deduplication
+     * (requirements.md §3). Keeping them as two parameters rather than one
+     * object makes deriving triggerId from attempt awkward to do by accident.
      */
     fun fire(task: Task, triggerId: String, attempt: Int): SinkResult
 }

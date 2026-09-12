@@ -23,20 +23,20 @@ class PollingLoop(
     private val taskSink: TaskSink,
     private val taskExecutor: ThreadPoolExecutor,
     private val metrics: SchedulerMetrics,
-    // 8/27 load test: 500 × 5 polls/s × 2 nodes was a ~4,400/s claim ceiling,
-    // short of the 5,000/s SLO. 2,000 clears it (measured 5,118/s peak) and,
-    // with the backpressure below, never actually claims more than the fire
-    // pool can take.
+    // Ceiling, not a batch size: 500 × 5 polls/s × 2 nodes capped claiming at
+    // ~4,400/s, short of the 5,000/s SLO. 2,000 clears it (5,118/s measured),
+    // and the backpressure below keeps the effective claim within what the fire
+    // pool can drain. See docs/performance.md §2.
     @Value("\${chronos.poll.claim-limit:2000}")
     private val claimLimit: Int,
 ) {
     private val log = LoggerFactory.getLogger(javaClass)
 
     /**
-     * Backpressure (8/27): how many more tasks the firing pool can take right
-     * now — idle threads plus free queue slots. Claiming more than this only
-     * grows the `firing` backlog past what the pool can drain inside the 30 s
-     * lease, which is what turns a burst into a re-fire storm.
+     * How many more tasks the firing pool can take: idle threads plus free queue
+     * slots. Claiming beyond this grows the `firing` backlog past what the pool
+     * can drain inside the 30s lease, which turns a burst into a re-fire storm
+     * (ADR-004 decision 7).
      */
     private fun fireCapacity(): Int =
         (taskExecutor.maximumPoolSize - taskExecutor.activeCount) +
@@ -56,8 +56,8 @@ class PollingLoop(
             }
 
             claimed.forEach { c ->
-                // §9: trigger delay recorded here, from the DB clock (c.dbFiredAt),
-                // at the moment of the claim — the "actual trigger" instant.
+                // Recorded at claim time from the DB clock (c.dbFiredAt), which
+                // is the actual trigger instant — ADR-004 decision 1.
                 metrics.recordTriggerDelay(c.triggerDelay)
                 taskExecutor.submit { handle(c.task) }
             }
@@ -94,10 +94,10 @@ class PollingLoop(
 
             else -> {
                 // 0-row conditional update. If the task is already 'succeeded',
-                // another node completed it while this one was in flight — this
-                // node's sink call was a duplicate delivery the optimistic lock
-                // absorbed (ADR-004 decision 2). Any other state is a plain
-                // version race (reaper reclaimed it, etc.), not a duplicate.
+                // another node completed it while this one was in flight, so
+                // this node's sink call was an absorbed duplicate delivery
+                // (ADR-004 decision 2). Any other state — the reaper reclaimed
+                // it, for instance — is a plain version race, not a duplicate.
                 val current = taskRepository.findById(task.id)
                 if (current?.state == TaskState.SUCCEEDED) {
                     metrics.duplicateTriggerAbsorbed()

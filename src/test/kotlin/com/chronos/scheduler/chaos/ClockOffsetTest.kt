@@ -16,17 +16,16 @@ import java.sql.ResultSet
 import java.util.UUID
 
 /**
- * Chaos scenario 7 (8/23, clock offset) — behavior verification only.
+ * Chaos scenario 7 (clock offset), behavior half.
  *
  * Node A's wall clock is pushed 5 minutes fast (Clock.offset). Its triggering
  * must be indistinguishable from a node with a correct clock, because every
- * correctness comparison — fire_at <= now(), lease_expires_at < now() — runs
- * in Postgres against the database clock. The node's own Clock only feeds
+ * correctness comparison — fire_at <= now(), lease_expires_at < now() — runs in
+ * Postgres against the database clock. The node's own Clock only feeds
  * submission-time validation.
  *
- * (The "trigger_delay_seconds must be measured on the DB clock" half of the
- * 8/23 plan is deferred to 8/24, when that metric is actually wired to
- * Micrometer — see notes/scenario-7-8-notes.md.)
+ * The metric half — trigger delay measured on the database clock — is
+ * TriggerDelayMetricTest.
  */
 @Testcontainers
 class ClockOffsetTest {

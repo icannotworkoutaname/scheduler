@@ -11,7 +11,7 @@ import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
 
 /**
- * Automates 8/12's manual bash race test: N concurrent "racers" all try to
+ * N concurrent racers all try to
  * claim the same batch of due tasks. Deliberately raw JDBC, not a full Spring
  * context — this test is about whether the SQL itself (FOR UPDATE SKIP
  * LOCKED) is safe under concurrency, which doesn't need the application

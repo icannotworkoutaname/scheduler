@@ -15,7 +15,7 @@ import java.net.http.HttpRequest
 import java.net.http.HttpResponse
 
 /**
- * requirements.md §9 acceptance for 8/24: /actuator/prometheus exposes all
+ * requirements.md §9 acceptance: /actuator/prometheus exposes all
  * seven metrics. They are all registered at startup (counters/timers show a
  * zero series before their first event), so this doesn't need to exercise
  * each one — just that the wiring and the endpoint are in place.
@@ -79,7 +79,7 @@ class PrometheusEndpointTest {
         )
 
         // the firing-load gauge must actually COUNT, not silently swallow a SQL
-        // error and sit at 0 (8/27: an earlier form did exactly that)
+        // error and sit at 0, which an earlier form of the query did
         java.sql.DriverManager.getConnection(postgres.jdbcUrl, postgres.username, postgres.password).use { c ->
             c.prepareStatement(
                 "INSERT INTO tasks (id, idempotency_key, payload, callback_url, fire_at, state, shard, lease_owner, lease_expires_at) " +

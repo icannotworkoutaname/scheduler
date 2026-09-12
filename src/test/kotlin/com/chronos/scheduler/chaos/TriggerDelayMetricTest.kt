@@ -14,7 +14,7 @@ import java.sql.DriverManager
 import java.util.UUID
 
 /**
- * ADR-004 decision 1 — the metric half of chaos scenario 7, deferred from 8/23.
+ * ADR-004 decision 1 — the metric half of chaos scenario 7.
  *
  * trigger_delay_seconds must be computed from the database clock (db_fired_at −
  * fire_at, both from the same UPDATE ... RETURNING). A node whose wall clock is

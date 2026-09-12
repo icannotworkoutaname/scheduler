@@ -6,14 +6,14 @@ object RetryPolicy {
     const val MAX_ATTEMPTS = 5
 
     /**
-     * attempt 是已经发生的尝试次数(claim 时递增过的 attempt_count)。
-     * 例如第 1 次尝试失败(attempt=1)，退避到第 2 次尝试；
-     * 第 5 次尝试失败(attempt=5)，达到上限，进 dead，不再退避。
+     * `attempt` is the number of attempts already made — attempt_count, which the
+     * claim query increments. attempt=1 means the first attempt just failed and a
+     * second is due; attempt=MAX_ATTEMPTS means the budget is spent and the task
+     * goes to dead.
      */
     fun shouldRetry(attempt: Int): Boolean = attempt < MAX_ATTEMPTS
 
-    fun backoffFor(attempt: Int): Duration {
-        val seconds = (1L shl attempt.coerceAtMost(6)) // 2, 4, 8, 16, 32...
-        return Duration.ofSeconds(seconds)
-    }
+    /** 2, 4, 8, 16 s for attempts 1..4; attempt 5 exhausts the budget instead. */
+    fun backoffFor(attempt: Int): Duration =
+        Duration.ofSeconds(1L shl attempt.coerceIn(1, MAX_ATTEMPTS))
 }

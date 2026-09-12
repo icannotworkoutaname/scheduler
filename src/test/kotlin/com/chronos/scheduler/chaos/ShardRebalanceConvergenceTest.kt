@@ -13,7 +13,7 @@ import org.testcontainers.junit.jupiter.Testcontainers
 import java.sql.DriverManager
 
 /**
- * Reviews the 8/23 rebalance fix (ShardBootstrap.forceClaimOneShard +
+ * Reviews the rebalance fix (ShardBootstrap.forceClaimOneShard +
  * ShardHeartbeat's downward releaseExcessShards) for a symmetric failure it
  * could plausibly introduce.
  *

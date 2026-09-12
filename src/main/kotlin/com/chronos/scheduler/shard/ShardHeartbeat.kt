@@ -12,22 +12,18 @@ import java.time.Instant
 import java.util.concurrent.atomic.AtomicBoolean
 
 /**
- * Every heartbeat period: renew whatever this node currently holds, then try
- * to claim more if it's below fair share. That second half is what makes
- * takeover happen — no separate "watch for dead nodes" mechanism exists. A
- * surviving node doesn't detect that another node died; it just keeps
- * periodically reaching for shards that satisfy claimAvailableShards'
- * condition (lease null or expired), and a dead node's former shards
- * eventually satisfy that condition on their own once the lease clock runs
- * out — nobody has to notice anything.
+ * Every heartbeat period: renew what this node holds, then claim more if it is
+ * below fair share. The second half is the takeover mechanism — there is no
+ * separate death-detection path. A surviving node never detects that a peer
+ * died; it keeps reaching for shards whose lease is null or expired, and a dead
+ * node's shards satisfy that condition once its lease runs out.
  *
- * The period is measured against the injected Clock, not Spring's @Scheduled
- * wall clock: @Scheduled just polls often (poll-ms), and the real renewal
- * only fires once `clock.instant()` has advanced a full period past the last
- * one. Under a normal Clock this is indistinguishable from the old
- * fixedDelay=10000. Under scenario 8's DriftingClock a slow node's renewals
- * stretch out in real time while the DB-side lease TTL does not — that
- * asymmetry is the whole point of the drift scenario (see DriftingClock).
+ * The period is measured against the injected Clock, not @Scheduled's wall
+ * clock: @Scheduled polls frequently (poll-ms) and a renewal happens only once
+ * clock.instant() has advanced a full period. Under a normal Clock this is
+ * equivalent to fixedDelay=10000. Under scenario 8's DriftingClock a slow node's
+ * renewals stretch out in real time while the database-side lease TTL does not,
+ * which is what the drift scenario measures (see DriftingClock).
  */
 @Component
 class ShardHeartbeat(
@@ -45,13 +41,11 @@ class ShardHeartbeat(
         .register(meterRegistry)
 
     /**
-     * Gates renewAndRebalance() until ShardBootstrap has finished its own
-     * announce-then-settle protocol. Spring's @Scheduled fires its first
-     * execution immediately on startup with no way to suppress that short of
-     * an initialDelay — and any initialDelay is a guessed number that can
-     * drift out of sync with settle-delay-seconds. A readiness flag set by
-     * ShardBootstrap itself, once it's actually done, needs no timing
-     * assumption at all.
+     * Gates renewAndRebalance() until ShardBootstrap has finished its
+     * announce-then-settle protocol. @Scheduled fires its first execution
+     * immediately, and the only built-in alternative is an initialDelay, which
+     * would be a second timing constant to keep in sync with
+     * settle-delay-seconds. A flag set by ShardBootstrap needs no such constant.
      */
     private val ready = AtomicBoolean(false)
 
@@ -59,7 +53,7 @@ class ShardHeartbeat(
     @Volatile
     private var nextRenewalDue: Instant = Instant.MIN
 
-    /** Called by ShardBootstrap right after its settle window — this doubles as this node's first heartbeat, run deterministically rather than raced against the scheduler's own startup tick. */
+    /** Called by ShardBootstrap after its settle window; doubles as this node's first heartbeat. */
     fun markReadyAndRun() {
         ready.set(true)
         nextRenewalDue = clock.instant()
@@ -79,9 +73,8 @@ class ShardHeartbeat(
         val activeOwners = shardLeaseRepository.countDistinctActiveOwners()
         val softCap = shardAllocator.softCapFor(activeOwners)
 
-        // Downward rebalance: hand back anything above fair share. Turns a
-        // winner-takes-all start (or any transient over-hold) into something
-        // that converges on the next heartbeat instead of staying broken.
+        // Downward rebalance: hand back anything above fair share, so a
+        // winner-takes-all start converges on the next heartbeat.
         if (renewed.size > softCap) {
             val released = shardLeaseRepository.releaseExcessShards(nodeIdentity.nodeId, softCap)
             log.warn(

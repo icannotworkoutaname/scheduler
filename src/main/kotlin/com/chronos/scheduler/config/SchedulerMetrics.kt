@@ -16,10 +16,10 @@ import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicInteger
 
 /**
- * requirements.md §9 — the instrumentation, in one place so the semantic
- * decisions (docs/adr/004-metrics-semantics.md) sit next to the code that
- * enforces them. `chronos.lease.takeover.total` is the exception: it was wired
- * into ShardHeartbeat on 8/12 and stays there.
+ * requirements.md §9 — the instrumentation in one place, so the semantic
+ * decisions (docs/adr/004-metrics-semantics.md) sit next to the code enforcing
+ * them. `chronos.lease.takeover.total` is the exception: it lives in
+ * ShardHeartbeat, where the takeover is detected.
  */
 @Component
 class SchedulerMetrics(
@@ -29,7 +29,7 @@ class SchedulerMetrics(
     private val log = LoggerFactory.getLogger(javaClass)
 
     companion object {
-        const val PENDING_SAMPLE_SECONDS = 15L
+        const val FIRING_SAMPLE_SECONDS = 15L
         const val TOTAL_SHARDS = 64
     }
 
@@ -53,13 +53,11 @@ class SchedulerMetrics(
         .register(registry)
 
     /**
-     * ADR-004 decision 2: this is NOT "duplicates I prevented". A single node
-     * cannot know a fire is a duplicate — from its view every fire it makes is
-     * legitimate. This counts the event "a node finished firing a task that
-     * another node had already driven to 'succeeded', and its conditional
-     * state-update touched 0 rows". Those 0 rows ARE a late duplicate delivery
-     * being absorbed by the optimistic lock. The duplicate happened; this
-     * records that it was harmless.
+     * ADR-004 decision 2: absorption, not prevention. A single node cannot know
+     * that one of its fires is a duplicate — from its own view every fire is
+     * legitimate. This counts the observable aftermath: a node finished firing a
+     * task another node had already driven to 'succeeded', and its conditional
+     * state update touched 0 rows.
      */
     private val duplicateTrigger: Counter = Counter.builder("chronos.duplicate.trigger.total")
         .description("fires delivered downstream for a task another node had already completed; absorbed by the optimistic lock (0-row conditional update)")
@@ -69,7 +67,7 @@ class SchedulerMetrics(
         .description("tasks moved to the dead-letter state after exhausting retries")
         .register(registry)
 
-    /** Covers the no-op path too — 8/26 uses the idle value to show polling is a cheap bounded index scan when nothing is due. */
+    /** Covers the no-op path, whose idle value is the ADR-001 evidence that polling stays cheap. */
     private val pollTimer: Timer = Timer.builder("chronos.poll.duration.seconds")
         .description("one poll-and-claim cycle, including the path where nothing is due")
         .serviceLevelObjectives(
@@ -97,11 +95,10 @@ class SchedulerMetrics(
         .register(registry)
 
     // --- chronos.tasks.firing: per-shard live-load gauge, ADR-004 decision 3 -
-    // 8/27: renamed from chronos.tasks.pending (never was "total backlog"). It
-    // now counts what each shard is firing right now — cheap (state='firing' is
-    // selective and covered by the partial index), and the live per-shard work
-    // distribution, which is what "are the shards balanced" actually asks. 0 for
-    // every shard at rest, correctly reading as "no load".
+    // Renamed from chronos.tasks.pending, which was a full-table scan at 1M
+    // rows. This counts what each shard is firing right now: selective, covered
+    // by the partial index, and the live per-shard work distribution that
+    // answers "are the shards balanced". 0 for every shard at rest.
     private val firingByShard = Array(TOTAL_SHARDS) { AtomicInteger(0) }
     private var sampler: ScheduledExecutorService? = null
 
@@ -111,16 +108,17 @@ class SchedulerMetrics(
             Gauge.builder("chronos.tasks.firing", firingByShard[shard]) { it.get().toDouble() }
                 .description(
                     "tasks this shard is firing right now — the live per-shard load. " +
-                        "Sampled every ${PENDING_SAMPLE_SECONDS}s, not per scrape; 0 everywhere means idle."
+                        "Sampled every ${FIRING_SAMPLE_SECONDS}s, not per scrape; 0 everywhere means idle."
                 )
                 .tag("shard", shard.toString())
                 .register(registry)
         }
-        // 独立单线程，绝不阻塞共享的 @Scheduled 轮询线程（心跳停顿排查里那条教训）。
+        // Own single thread: sampling must never block the shared @Scheduled
+        // poll thread. See HEARTBEAT_STALL_INVESTIGATION.md.
         sampler = Executors.newSingleThreadScheduledExecutor { r ->
             Thread(r, "firing-load-sampler").apply { isDaemon = true }
         }.also {
-            it.scheduleWithFixedDelay(::sampleFiring, 0, PENDING_SAMPLE_SECONDS, TimeUnit.SECONDS)
+            it.scheduleWithFixedDelay(::sampleFiring, 0, FIRING_SAMPLE_SECONDS, TimeUnit.SECONDS)
         }
     }
 
@@ -143,9 +141,8 @@ class SchedulerMetrics(
     // --- recording entry points --------------------------------------------
 
     fun recordTriggerDelay(delay: Duration) {
-        // A negative delay (fire_at in the future) shouldn't be reachable — the
-        // claim query filters fire_at <= now() — but clamp rather than let the
-        // timer throw if the clocks ever disagree by a hair.
+        // A negative delay should be unreachable, since the claim query filters
+        // fire_at <= now(); clamp rather than let the timer throw.
         triggerDelay.record(if (delay.isNegative) Duration.ZERO else delay)
     }
 
@@ -166,10 +163,10 @@ class SchedulerMetrics(
         (if (success) sinkTimerSuccess else sinkTimerFailure).record(elapsed)
     }
 
-    /** Current sampled pending count for a shard — test/diagnostic hook. */
+    /** Last sampled firing count for a shard; test and diagnostic hook. */
     fun firingForShard(shard: Int): Int = firingByShard[shard].get()
 
-    /** Force a firing-load sample now — test hook so a test doesn't wait 15s. */
+    /** Samples immediately, so a test need not wait out the sample interval. */
     fun sampleNow() = sampleFiring()
 
     fun triggerDelayCount(): Long = triggerDelay.count()

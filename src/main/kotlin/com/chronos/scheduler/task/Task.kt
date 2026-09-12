@@ -6,7 +6,7 @@ import java.util.UUID
 data class Task(
     val id: UUID,
     val idempotencyKey: String,
-    val payload: String,       // 先存 JSON 原始文本，序列化细节下一步再定
+    val payload: String,       // raw JSON text; stored as jsonb, never parsed here
     val callbackUrl: String,
     val fireAt: Instant,
     val state: TaskState,
@@ -35,7 +35,7 @@ data class Task(
                 fireAt = fireAt,
                 state = TaskState.PENDING,
                 version = 0,
-                shard = ShardCalculator.shardFor(id),   // 顺序在这里被强制正确
+                shard = ShardCalculator.shardFor(id),   // derived from the id above, never recomputed later
                 leaseOwner = null,
                 leaseExpiresAt = null,
                 attemptCount = 0,

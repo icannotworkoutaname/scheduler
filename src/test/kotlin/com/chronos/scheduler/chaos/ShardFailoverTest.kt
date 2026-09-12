@@ -55,11 +55,14 @@ class ShardFailoverTest {
         SpringApplicationBuilder(SchedulerApplication::class.java)
             .run(
                 "--server.port=$port",
-                // settle-delay 必须够长，让慢启动的对等节点完成 Phase 1(报到)——
-                // 否则先跑完 settle 的节点在 Phase 3 只看到自己一个 owner，softCap
-                // 算成 64，独吞全部 shard，而心跳没有向下再平衡的逻辑(8/20)，之后
-                // 永远收不回来。1 秒在并行启动两个 Spring 上下文的 CI/Testcontainers
-                // 环境里不够，实测约 1/3 概率复现独吞；5 秒有充足余量。
+                // The settle delay must outlast a slow peer's phase 1. Otherwise
+                // the node that settles first sees itself as the only owner in
+                // phase 3, computes softCap = 64 and takes every shard; the
+                // heartbeat does recover from that now (releaseExcessShards),
+                // but it costs a heartbeat period and makes the assertions
+                // timing-dependent. 1s is not enough when two Spring contexts
+                // start in parallel under Testcontainers — measured at roughly a
+                // 1-in-3 reproduction rate; 5s has ample margin.
                 "--chronos.shard.settle-delay-seconds=5",
                 "--spring.datasource.url=${postgres.jdbcUrl}",
                 "--spring.datasource.username=${postgres.username}",

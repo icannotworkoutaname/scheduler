@@ -4,11 +4,9 @@ import com.chronos.scheduler.node.NodeIdentity
 import org.springframework.stereotype.Component
 
 /**
- * Replaces StaticAllShardAssignment (8/7 placeholder). Queries the shards
- * table for whichever rows this node currently owns — the polling loop
- * (PollingLoop.kt) depends only on the ShardAssignment interface, so this
- * swap doesn't touch any polling code, exactly as planned when the interface
- * was introduced.
+ * Reads this node's owned shards from the shards table on every call, so a
+ * lease lost between polls disappears from the set without any explicit
+ * invalidation. See ShardLeaseRepository.ownedShardsFor for the expiry filter.
  */
 @Component
 class DynamicShardAssignment(

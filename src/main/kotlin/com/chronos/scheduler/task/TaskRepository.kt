@@ -12,11 +12,11 @@ import java.util.UUID
 data class ReclaimedLease(val taskId: UUID, val previousOwner: String?)
 
 /**
- * A task the claim query just moved to 'firing', plus the database's own `now()`
- * from that same UPDATE ... RETURNING. requirements.md §9 / ADR-004 decision 1:
- * trigger delay is `dbFiredAt - task.fireAt` — both timestamps come from Postgres,
- * never a node's Instant.now(), so a node with a skewed or drifting clock still
- * reports a correct delay.
+ * A task the claim query just moved to 'firing', plus the database's own now()
+ * from the same UPDATE ... RETURNING. Trigger delay is dbFiredAt - task.fireAt:
+ * both timestamps come from Postgres, never a node's Instant.now(), so a node
+ * with a skewed or drifting clock still reports a correct delay (ADR-004
+ * decision 1).
  */
 data class ClaimedTask(val task: Task, val dbFiredAt: Instant) {
     val triggerDelay: java.time.Duration
@@ -28,21 +28,18 @@ class TaskRepository(
     private val jdbcClient: JdbcClient,
     /**
      * How long a claimed task stays 'firing' before the reaper may reclaim it.
-     * Default 30s (requirements.md §6). Configurable so `make demo` / the
-     * accelerated tests can shrink the "wait for the lease to expire" step from
-     * ~40s to a few seconds — the mechanism is identical, only the clock is
-     * faster. Production stays 30s.
+     * Default 30s (requirements.md §6). Configurable so `make demo` and the
+     * accelerated tests can shrink the lease-expiry wait from ~40s to a few
+     * seconds; the mechanism is identical either way.
      */
     @Value("\${chronos.task.lease-ttl-seconds:30}")
     private val taskLeaseTtlSeconds: Long = 30,
 ) {
 
     /**
-     * Submit-side idempotency (requirements.md §3, layer 1): if idempotencyKey
-     * already exists, this returns the EXISTING task rather than creating a new
-     * one or throwing. The uniqueness guarantee lives in the database constraint
-     * (tasks_idempotency_key_uq) — this method just makes the conflict path
-     * ergonomic to call from the controller.
+     * Submit-side idempotency (requirements.md §3, layer 1). The uniqueness
+     * guarantee is the tasks_idempotency_key_uq constraint; on conflict this
+     * returns the existing task instead of throwing.
      */
     fun insertOrGetExisting(task: Task): Task {
         val inserted = jdbcClient.sql(
@@ -65,9 +62,8 @@ class TaskRepository(
             .query(::mapRow)
             .optional()
 
-        // ON CONFLICT DO NOTHING means zero rows come back on a duplicate key —
-        // that's the conflict path. Fetch and return what's already there instead
-        // of treating it as an error.
+        // DO NOTHING returns zero rows on a duplicate key: that is the conflict
+        // path, not an error.
         return inserted.orElseGet { findByIdempotencyKey(task.idempotencyKey) }
     }
 
@@ -105,22 +101,15 @@ class TaskRepository(
     }
 
     /**
-     * requirements.md §9 / ADR-004 decision 3: backing query for the per-shard
-     * live-load gauge, every 15s from SchedulerMetrics' own thread.
+     * Backing query for the per-shard live-load gauge (requirements.md §9,
+     * ADR-004 decision 3), sampled every 15s from SchedulerMetrics' own thread.
      *
-     * 8/27, two dead ends before this: the original
-     * `WHERE state IN (pending,retrying) GROUP BY shard` is a 91ms parallel
-     * full-table Seq Scan at 1M rows (`state` matches ~everything, no `shard =`
-     * to seek on). Bounding it to "due in the next 5 min" only made it worse
-     * (300ms) — under a real drain that window holds tens of thousands of rows
-     * and an exact count is O(matches).
-     *
-     * What's actually cheap AND the right question: how many rows each shard is
-     * firing *right now*. `state = 'firing'` is highly selective (backpressure
-     * caps it at a few thousand total), the partial index
-     * `tasks_firing_lease_expires_idx WHERE state = 'firing'` covers it, and the
-     * count is the live per-shard work distribution — 0 for every shard when
-     * idle, which correctly reads as "no load". ~0.9ms at rest, ~15ms mid-burst.
+     * Deliberately counts `firing`, not backlog. Counting pending/retrying rows
+     * is a 91ms parallel full-table Seq Scan at 1M rows — `state` matches nearly
+     * everything and there is no `shard =` predicate to seek on — and bounding
+     * it by fire_at is worse (300ms under a drain). `state = 'firing'` is
+     * selective, covered by tasks_firing_lease_expires_idx, and answers the
+     * question the gauge exists for: ~0.9ms at rest, ~15ms mid-burst.
      */
     fun firingCountByShard(): Map<Int, Int> =
         jdbcClient.sql(
@@ -132,10 +121,9 @@ class TaskRepository(
 
     /**
      * firing -> succeeded, guarded by the version this node observed at claim
-     * time. A 0-row update here would mean something else touched this row
-     * between claim and completion — shouldn't happen in the single-node case
-     * we're in today, but the guard costs nothing and stays correct once 8/10
-     * introduces real multi-node contention.
+     * time. A 0-row update means something else touched the row between claim
+     * and completion; PollingLoop.handle distinguishes an absorbed duplicate
+     * from a plain version race (ADR-004 decision 2).
      */
     fun markSucceeded(id: UUID, expectedVersion: Long): Boolean {
         val rows = jdbcClient.sql(
@@ -154,8 +142,8 @@ class TaskRepository(
 
     /**
      * firing -> retrying (with backoff) or firing -> dead, decided by whether
-     * attempt has hit RetryPolicy.MAX_ATTEMPTS. Guarded by expectedVersion for
-     * the same reason markSucceeded is — cheap correctness insurance.
+     * attempt has hit RetryPolicy.MAX_ATTEMPTS. Version-guarded for the same
+     * reason as markSucceeded.
      */
     fun markFailed(id: UUID, attempt: Int, expectedVersion: Long): Boolean {
         val rows = if (RetryPolicy.shouldRetry(attempt)) {
@@ -191,14 +179,12 @@ class TaskRepository(
 
     /**
      * requirements.md §6: sweeps rows stuck in 'firing' past their lease and
-     * returns them to 'pending'. This is the mechanism that turns a node freeze
-     * into a recoverable duplicate rather than a lost task — the entire premise
-     * of chaos scenario 6 (8/21) depends on this working correctly.
+     * returns them to 'pending'. This is what turns a node freeze into a
+     * recoverable duplicate rather than a lost task (chaos scenario 6).
      *
-     * The CTE captures lease_owner BEFORE it gets wiped, purely for the log line
-     * below — knowing which node died is useful during the freeze scenario.
-     * Still a single atomic statement: no intermediate state a crash can land in,
-     * same discipline as the claim query in §7.1.
+     * The CTE captures lease_owner before it is wiped, for the caller's log
+     * line. Still one statement, so there is no intermediate state a crash can
+     * land in — same discipline as the claim query.
      */
     fun reclaimExpiredLeases(limit: Int = 500): List<ReclaimedLease> {
         return jdbcClient.sql(
@@ -232,9 +218,8 @@ class TaskRepository(
     }
 
     /**
-     * requirements.md §6: "cancel and reschedule are legal only from pending."
-     * The WHERE clause IS that rule — a task in any other state just won't
-     * match, 0 rows come back, no separate state-check-then-update needed.
+     * requirements.md §6: cancel and reschedule are legal only from pending.
+     * The WHERE clause is that rule; no separate state check is needed.
      */
     fun cancelIfPending(id: UUID): Boolean {
         val rows = jdbcClient.sql(
@@ -250,10 +235,10 @@ class TaskRepository(
     }
 
     /**
-     * requirements.md §7: reschedule under the polling design is just an
-     * UPDATE fire_at — no data structure to rebalance. version is the
-     * client-supplied optimistic lock (requirements.md §3), guarding against
-     * two callers racing to reschedule off the same stale read.
+     * Reschedule under the polling design is an UPDATE of fire_at; there is no
+     * in-memory structure to rebalance (ADR-001). expectedVersion is the
+     * client-supplied optimistic lock, guarding two callers rescheduling off
+     * the same stale read.
      */
     fun rescheduleIfPending(id: UUID, newFireAt: Instant, expectedVersion: Long): Boolean {
         val rows = jdbcClient.sql(

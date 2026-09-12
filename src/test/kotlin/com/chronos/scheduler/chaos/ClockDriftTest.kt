@@ -15,7 +15,7 @@ import org.testcontainers.junit.jupiter.Testcontainers
 import java.sql.DriverManager
 
 /**
- * Chaos scenario 8 (8/23, clock drift) — the deliverable is a number: the
+ * Chaos scenario 8 (clock drift). The deliverable is a number: the
  * drift rate at which the design collapses.
  *
  * ShardHeartbeat derives its renewal cadence from the injected Clock, but the

@@ -9,7 +9,7 @@ class ShardAllocator {
         const val TOTAL_SHARDS = 64
     }
 
-    /** activeOwnerCount 应该已经反映真实情况——包括调用方自己,如果它已经报到过。 */
+    /** activeOwnerCount includes the caller, provided it has already announced. */
     fun softCapFor(activeOwnerCount: Int): Int =
         ceil(TOTAL_SHARDS.toDouble() / activeOwnerCount.coerceAtLeast(1)).toInt()
 }

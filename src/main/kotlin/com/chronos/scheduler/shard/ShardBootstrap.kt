@@ -18,31 +18,29 @@ class ShardBootstrap(
     private val log = LoggerFactory.getLogger(javaClass)
 
     override fun run(vararg args: String) {
-        // Phase 1 —— 报到:立刻抢 1 个 shard,不管多不管少，
-        // 目的只是尽快让自己出现在 countDistinctActiveOwners() 里，
-        // 让几乎同时启动的兄弟节点有机会"看见"自己。
+        // Phase 1 — announce: claim one shard immediately, so this node appears
+        // in countDistinctActiveOwners() before any peer computes a soft cap.
         val announced = shardLeaseRepository.claimAvailableShards(nodeIdentity.nodeId, 1)
         if (announced.isEmpty()) {
-            // Every shard is currently leased — a peer lapped us during startup.
-            // Steal one anyway so we show up as an active owner; the peer's next
-            // heartbeat will then rebalance down to a fair share.
+            // Every shard is leased: a peer won the startup race. Take one
+            // anyway to become visible; the peer's next heartbeat rebalances
+            // down to a fair share.
             val stolen = shardLeaseRepository.forceClaimOneShard(nodeIdentity.nodeId)
             log.info("node {} announced by force-claiming shard {} (all shards were leased)", nodeIdentity.nodeId, stolen)
         } else {
             log.info("node {} announced with shard(s) {}", nodeIdentity.nodeId, announced.map { it.shardId })
         }
 
-        // Phase 2 —— 等待:给兄弟节点留出时间也完成它们自己的 Phase 1。
-        // 这次延迟放在报到之后，不是放在报到之前——上次的版本睡在最前面，
-        // 睡的时候两边都还没在数据库里露面，等长的延迟不会缩小彼此的相对差距。
+        // Phase 2 — settle: give peers time to finish their own phase 1. The
+        // delay is after the announce, not before it: sleeping first leaves both
+        // nodes absent from the database, so the wait does not reduce the gap.
         Thread.sleep(settleDelaySeconds * 1000)
 
-        // Phase 3 —— 按公平份额认领剩下的:不再自己重复一遍 renew+claim 逻辑,
-        // 直接复用 ShardHeartbeat.markReadyAndRun()——它既是"正式解禁心跳"的
-        // 信号,又充当这个节点的第一次心跳执行。这样心跳的 @Scheduled 首次
-        // 自动触发(默认立即执行)不会跟这里的 Phase 3 抢跑：在 markReadyAndRun
-        // 被调用之前,renewAndRebalance() 会因为 ready 标志还是 false 直接跳过,
-        // 不依赖任何猜出来的时间数字去错开两者。
+        // Phase 3 — claim up to fair share, by running the heartbeat itself
+        // rather than duplicating its renew-and-claim logic. markReadyAndRun
+        // both lifts the readiness gate and performs this node's first
+        // heartbeat, so the scheduler's own first tick cannot race phase 3:
+        // until the flag is set, renewAndRebalance() returns immediately.
         shardHeartbeat.markReadyAndRun()
     }
 }

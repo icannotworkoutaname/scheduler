@@ -21,11 +21,10 @@ class ShardLeaseRepository(
 ) {
 
     /**
-     * Same SKIP LOCKED idiom as before, now captures the previous owner via a
-     * CTE (same technique as TaskRepository.reclaimExpiredLeases, 8/9). This
-     * lets callers tell "claimed a shard nobody held" apart from "took over a
-     * shard someone else used to hold" — only the latter counts toward
-     * lease_takeover_total (requirements.md §9).
+     * Claims up to softCap shards whose lease is null or expired. The CTE
+     * captures the previous owner so callers can tell "claimed a shard nobody
+     * held" from "took over a shard someone else held" — only the latter counts
+     * toward lease_takeover_total (requirements.md §9).
      */
     fun claimAvailableShards(nodeId: String, softCap: Int): List<ClaimedShard> {
         if (softCap <= 0) return emptyList()
@@ -64,14 +63,13 @@ class ShardLeaseRepository(
     /**
      * Take exactly one shard no matter what — an unowned one if there is any,
      * otherwise whichever live lease is closest to expiring. ShardBootstrap
-     * falls back to this when its normal Phase-1 announce claims nothing
-     * because a fast-starting peer already grabbed every shard. Phase 1's
-     * whole job is to make this node visible in countDistinctActiveOwners()
-     * before Phase 3 computes a soft cap; if it claims zero shards it stays
-     * invisible, the over-holding peer keeps softCap = TOTAL_SHARDS forever,
-     * and nothing ever rebalances (8/20). One stolen shard is enough — the
-     * over-holder's next heartbeat then sees two active owners, recomputes a
-     * fair softCap, and releaseExcessShards() hands the rest back.
+     * falls back to this when its normal phase-1 announce claims nothing,
+     * because a fast-starting peer already holds every shard. Phase 1 exists to
+     * make this node visible in countDistinctActiveOwners() before phase 3
+     * computes a soft cap; claiming zero shards leaves it invisible, the
+     * over-holding peer keeps softCap = TOTAL_SHARDS, and nothing rebalances.
+     * One shard is enough: the over-holder's next heartbeat sees two active
+     * owners, recomputes the cap, and releaseExcessShards() hands the rest back.
      */
     fun forceClaimOneShard(nodeId: String): Int? {
         return jdbcClient.sql(
@@ -101,24 +99,22 @@ class ShardLeaseRepository(
     }
 
     /**
-     * Keep the `keep` highest-numbered shards this node holds, release the
-     * rest (ORDER BY shard_id DESC OFFSET :keep). This is what makes a bad
-     * start — or any transient over-hold — self-heal. If a node claimed more
-     * than its fair share during the announce race (ran Phase 3 before a
-     * slow-booting peer finished Phase 1, saw only itself as active, computed
-     * softCap = TOTAL_SHARDS), its next heartbeat sees renewed > softCap and
-     * releases exactly the overage here. Without this the imbalance is
-     * permanent (8/20): the over-holder never drops below softCap on its own,
-     * and the under-holder's claim query finds nothing available.
+     * Keeps the `keep` highest-numbered shards this node holds and releases the
+     * rest. This is what makes an unbalanced start self-heal: a node that
+     * claimed more than its fair share during the announce race (ran phase 3
+     * before a slow-booting peer finished phase 1, saw only itself active,
+     * computed softCap = TOTAL_SHARDS) sees renewed > softCap on its next
+     * heartbeat and releases exactly the overage. Without this the imbalance is
+     * permanent — the over-holder never drops below softCap on its own, and the
+     * under-holder's claim query finds nothing available.
      *
-     * It releases the EXACT overage (`held - keep`), never more, and the
-     * heartbeat only ever claims up to `softCap - held`, never more — so with
-     * N healthy nodes and Σ held = 64 ≤ N·softCap the released shards are
-     * always ≤ what the under-holders want, nothing overshoots, and the split
-     * converges to a fixed point (proven out by ShardRebalanceConvergenceTest).
+     * It releases exactly `held - keep` and the heartbeat claims at most
+     * `softCap - held`, so with N healthy nodes and Σ held = 64 ≤ N·softCap the
+     * released shards never exceed what the under-holders want; the split
+     * converges to a fixed point (ShardRebalanceConvergenceTest).
      *
-     * Releasing is as safe as a takeover: shards carry no in-flight state,
-     * only tasks do, and task leases are independently version-guarded.
+     * Releasing is as safe as a takeover: shards carry no in-flight state, only
+     * tasks do, and task leases are independently version-guarded.
      */
     fun releaseExcessShards(nodeId: String, keep: Int): List<Int> {
         return jdbcClient.sql(
@@ -142,7 +138,7 @@ class ShardLeaseRepository(
             .list()
     }
 
-    /** Used to estimate how many nodes are currently active — see Step 3. */
+    /** Active node count, used as the divisor in ShardAllocator.softCapFor. */
     fun countDistinctActiveOwners(): Int {
         return jdbcClient.sql(
             "SELECT count(DISTINCT lease_owner) FROM shards WHERE lease_expires_at >= now()"
@@ -162,11 +158,10 @@ class ShardLeaseRepository(
 
     /**
      * Renews every shard this node currently holds. WHERE lease_owner = :nodeId
-     * is a CAS guard, not a defensive afterthought: if another node already
-     * reclaimed one of these rows (this node was slow, or briefly partitioned),
-     * that row's lease_owner no longer matches, and this UPDATE silently skips
-     * it — the node's view of "what I own" self-corrects to match the database's
-     * authoritative state on the very next poll, no special-case code needed.
+     * is the compare-and-set: if another node has already reclaimed one of these
+     * rows (this node was slow or briefly partitioned), lease_owner no longer
+     * matches and the UPDATE skips it, so the node's view of what it owns
+     * self-corrects against the database on the next poll.
      */
     fun renewOwnedShards(nodeId: String): List<Int> {
         return jdbcClient.sql(
