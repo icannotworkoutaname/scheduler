@@ -114,9 +114,12 @@ while [ "$(date +%s)" -lt "$DEADLINE" ]; do
 done
 REFIRED_BY=$(psql $PGURL -tAc "SELECT lease_owner FROM tasks WHERE id='$TID'")
 ATTEMPTS=$(psql $PGURL -tAc "SELECT attempt_count FROM tasks WHERE id='$TID'")
+# lease_owner is NodeIdentity.nodeId = "<hostname>-<8 hex>" — redact the hostname
+# before it hits the terminal (this is the demo's own screen, not app behavior).
+REFIRED_BY_DISPLAY=$(echo "$REFIRED_BY" | sed -E 's/^.*-([0-9a-f]{8})$/node-\1/')
 
 step "[4/6] the reaper returned the task to pending; the surviving node re-fired it"
-note "re-fired by $REFIRED_BY — with the SAME triggerId (derived from the task id, not the attempt),"
+note "re-fired by $REFIRED_BY_DISPLAY — with the SAME triggerId (derived from the task id, not the attempt),"
 note "so a downstream that dedups on triggerId runs the business action only once"
 
 step "[5/6] waking the frozen node — kill -CONT"
